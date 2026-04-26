@@ -1,0 +1,10 @@
+/build/
+/.vs/
+/.vscode/
+/*.user
+/*.sln
+/*.vcxproj*
+/*.exe
+/cmake-build-debug
+/output
+.idea
