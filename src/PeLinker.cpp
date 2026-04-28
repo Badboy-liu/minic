@@ -78,18 +78,35 @@ struct SectionLayout {
 struct ImportLayout {
     std::uint32_t idtRva = 0;
     std::uint32_t idtSize = 0;
-    std::uint32_t iatRva = 0;
-    std::uint32_t functionNameRva = 0;
-    std::uint32_t dllNameRva = 0;
     std::vector<std::uint8_t> bytes;
+    struct Symbol {
+        std::string symbolName;
+        std::string importName;
+        std::string dllName;
+        std::uint32_t thunkRva = 0;
+        std::uint32_t iatRva = 0;
+    };
+    struct Group {
+        std::string dllName;
+        std::vector<Symbol> symbols;
+    };
+    std::vector<Group> groups;
 };
 
 struct ResolvedSymbolTraceEntry {
     fs::path objectPath;
     std::string sectionName;
     std::string name;
+    std::string importDllName;
     std::uint32_t rva = 0;
+    std::uint32_t importIatRva = 0;
     bool imported = false;
+};
+
+struct ImportSpec {
+    const char *symbolName;
+    const char *importName;
+    const char *dllName;
 };
 
 struct RelocationTraceEntry {
@@ -117,6 +134,31 @@ bool isTraceableSymbol(const Symbol &symbol) {
     return !symbol.name.empty() && symbol.name[0] != '.' && symbol.storageClass == StorageClassExternal;
 }
 
+const std::vector<ImportSpec> &importCatalog() {
+    static const std::vector<ImportSpec> imports = {
+        {"ExitProcess", "ExitProcess", "kernel32.dll"},
+        {"fn_GetCurrentProcessId", "GetCurrentProcessId", "kernel32.dll"},
+        {"fn_puts", "puts", "msvcrt.dll"},
+    };
+    return imports;
+}
+
+const ImportSpec *findImportSpec(const std::string &symbolName) {
+    const auto &catalog = importCatalog();
+    const auto found = std::find_if(
+        catalog.begin(),
+        catalog.end(),
+        [&](const ImportSpec &spec) { return symbolName == spec.symbolName; });
+    if (found == catalog.end()) {
+        return nullptr;
+    }
+    return &*found;
+}
+
+bool isImportedSymbolName(const std::string &symbolName) {
+    return findImportSpec(symbolName) != nullptr;
+}
+
 std::string hex32(std::uint32_t value) {
     std::ostringstream out;
     out << "0x" << std::hex << std::uppercase << value;
@@ -124,8 +166,8 @@ std::string hex32(std::uint32_t value) {
 }
 
 std::string targetDescription(const Symbol &symbol, std::int32_t addend) {
-    if (symbol.sectionNumber == UndefinedSection && symbol.name == "ExitProcess") {
-        return "import ExitProcess";
+    if (symbol.sectionNumber == UndefinedSection && isImportedSymbolName(symbol.name)) {
+        return "import " + symbol.name;
     }
     if (addend == 0) {
         return symbol.name;
@@ -137,8 +179,8 @@ std::string targetDescription(const Symbol &symbol, std::int32_t addend) {
 }
 
 std::string targetDescription64(const Symbol &symbol, std::int64_t addend) {
-    if (symbol.sectionNumber == UndefinedSection && symbol.name == "ExitProcess") {
-        return "import ExitProcess";
+    if (symbol.sectionNumber == UndefinedSection && isImportedSymbolName(symbol.name)) {
+        return "import " + symbol.name;
     }
     if (addend == 0) {
         return symbol.name;
@@ -236,6 +278,13 @@ void patch32(std::vector<std::uint8_t> &bytes, std::size_t offset, std::uint32_t
         throw std::runtime_error("internal linker error: patch outside buffer");
     }
     write32(bytes, offset, value);
+}
+
+void patch64(std::vector<std::uint8_t> &bytes, std::size_t offset, std::uint64_t value) {
+    if (offset + 8 > bytes.size()) {
+        throw std::runtime_error("internal linker error: patch outside buffer");
+    }
+    write64(bytes, offset, value);
 }
 
 std::string readFixedName(const std::vector<std::uint8_t> &bytes, std::size_t offset, std::size_t size) {
@@ -366,37 +415,123 @@ std::vector<Relocation> readRelocations(const ObjectFile &object, const Section 
     return relocations;
 }
 
-ImportLayout buildImportLayout(std::uint32_t idataRva) {
+std::vector<ImportLayout::Group> buildRequestedImports(
+    const std::vector<LinkedObject> &linkedObjects,
+    const std::unordered_map<std::string, bool> &definedSymbolNames) {
+    std::unordered_map<std::string, bool> unresolvedExternals;
+    for (const auto &linkedObject : linkedObjects) {
+        for (const auto &symbol : linkedObject.object.symbols) {
+            if (!isTraceableSymbol(symbol) || symbol.sectionNumber != UndefinedSection) {
+                continue;
+            }
+            if (definedSymbolNames.find(symbol.name) != definedSymbolNames.end()) {
+                continue;
+            }
+            unresolvedExternals.emplace(symbol.name, true);
+        }
+    }
+
+    std::vector<ImportLayout::Group> groups;
+    for (const auto &spec : importCatalog()) {
+        const auto unresolved = unresolvedExternals.find(spec.symbolName);
+        if (unresolved == unresolvedExternals.end()) {
+            continue;
+        }
+        auto group = std::find_if(
+            groups.begin(),
+            groups.end(),
+            [&](const ImportLayout::Group &entry) { return entry.dllName == spec.dllName; });
+        if (group == groups.end()) {
+            groups.push_back(ImportLayout::Group{spec.dllName, {}});
+            group = std::prev(groups.end());
+        }
+        group->symbols.push_back(ImportLayout::Symbol{spec.symbolName, spec.importName, spec.dllName, 0, 0});
+        unresolvedExternals.erase(unresolved);
+    }
+
+    return groups;
+}
+
+void appendImportThunkPlaceholder(std::vector<std::uint8_t> &text) {
+    text.push_back(0xff);
+    text.push_back(0x25);
+    append32(text, 0);
+}
+
+void patchImportThunkDisplacement(
+    std::vector<std::uint8_t> &text,
+    std::uint32_t thunkOffset,
+    std::uint32_t thunkRva,
+    std::uint32_t iatRva) {
+    const std::int64_t displacement = static_cast<std::int64_t>(iatRva) -
+        static_cast<std::int64_t>(thunkRva + 6);
+    if (displacement < INT32_MIN || displacement > INT32_MAX) {
+        throw std::runtime_error("import thunk displacement out of range");
+    }
+    patch32(
+        text,
+        thunkOffset + 2,
+        static_cast<std::uint32_t>(static_cast<std::int32_t>(displacement)));
+}
+
+ImportLayout buildImportLayout(
+    std::uint32_t idataRva,
+    std::vector<ImportLayout::Group> groups) {
     ImportLayout layout;
     layout.idtRva = idataRva;
-    layout.idtSize = 40;
+    layout.idtSize = static_cast<std::uint32_t>((groups.size() + 1) * 20);
+    layout.groups = std::move(groups);
+    layout.bytes.resize(layout.idtSize, 0);
 
-    layout.bytes.resize(40, 0);
-    const std::uint32_t iltOffset = static_cast<std::uint32_t>(layout.bytes.size());
-    const std::uint32_t iltRva = idataRva + iltOffset;
-    append64(layout.bytes, 0);
-    append64(layout.bytes, 0);
+    std::vector<std::size_t> descriptorOffsets;
+    descriptorOffsets.reserve(layout.groups.size());
+    std::unordered_map<std::string, std::size_t> iltEntryOffsets;
+    std::unordered_map<std::string, std::size_t> iatEntryOffsets;
+    std::unordered_map<std::string, std::size_t> dllNameFieldOffsets;
 
-    const std::uint32_t iatOffset = static_cast<std::uint32_t>(layout.bytes.size());
-    layout.iatRva = idataRva + iatOffset;
-    append64(layout.bytes, 0);
-    append64(layout.bytes, 0);
+    for (std::size_t groupIndex = 0; groupIndex < layout.groups.size(); ++groupIndex) {
+        descriptorOffsets.push_back(groupIndex * 20);
+        auto &group = layout.groups[groupIndex];
+        const std::uint32_t iltRva = idataRva + static_cast<std::uint32_t>(layout.bytes.size());
+        for (const auto &symbol : group.symbols) {
+            iltEntryOffsets.emplace(symbol.symbolName, layout.bytes.size());
+            append64(layout.bytes, 0);
+        }
+        append64(layout.bytes, 0);
+        patch32(layout.bytes, descriptorOffsets[groupIndex], iltRva);
+    }
 
-    const std::uint32_t functionNameOffset = static_cast<std::uint32_t>(layout.bytes.size());
-    layout.functionNameRva = idataRva + functionNameOffset;
-    append16(layout.bytes, 0);
-    appendString(layout.bytes, "ExitProcess");
+    for (std::size_t groupIndex = 0; groupIndex < layout.groups.size(); ++groupIndex) {
+        auto &group = layout.groups[groupIndex];
+        const std::uint32_t iatRva = idataRva + static_cast<std::uint32_t>(layout.bytes.size());
+        for (auto &symbol : group.symbols) {
+            symbol.iatRva = idataRva + static_cast<std::uint32_t>(layout.bytes.size());
+            iatEntryOffsets.emplace(symbol.symbolName, layout.bytes.size());
+            append64(layout.bytes, 0);
+        }
+        append64(layout.bytes, 0);
+        patch32(layout.bytes, descriptorOffsets[groupIndex] + 16, iatRva);
+    }
 
-    const std::uint32_t dllNameOffset = static_cast<std::uint32_t>(layout.bytes.size());
-    layout.dllNameRva = idataRva + dllNameOffset;
-    appendString(layout.bytes, "kernel32.dll");
+    for (auto &group : layout.groups) {
+        for (auto &symbol : group.symbols) {
+            const std::uint32_t hintNameRva = idataRva + static_cast<std::uint32_t>(layout.bytes.size());
+            patch64(layout.bytes, iltEntryOffsets.at(symbol.symbolName), hintNameRva);
+            patch64(layout.bytes, iatEntryOffsets.at(symbol.symbolName), hintNameRva);
+            append16(layout.bytes, 0);
+            appendString(layout.bytes, symbol.importName);
+            if ((layout.bytes.size() & 1u) != 0) {
+                layout.bytes.push_back(0);
+            }
+        }
+    }
 
-    patch32(layout.bytes, iltOffset, layout.functionNameRva);
-    patch32(layout.bytes, iatOffset, layout.functionNameRva);
-
-    patch32(layout.bytes, 0, iltRva);
-    patch32(layout.bytes, 12, layout.dllNameRva);
-    patch32(layout.bytes, 16, layout.iatRva);
+    for (std::size_t groupIndex = 0; groupIndex < layout.groups.size(); ++groupIndex) {
+        auto &group = layout.groups[groupIndex];
+        const std::uint32_t dllNameRva = idataRva + static_cast<std::uint32_t>(layout.bytes.size());
+        appendString(layout.bytes, group.dllName);
+        patch32(layout.bytes, descriptorOffsets[groupIndex] + 12, dllNameRva);
+    }
 
     return layout;
 }
@@ -405,8 +540,7 @@ std::uint32_t resolveRelocationTargetRva(
     const LinkedObject &linkedObject,
     const Symbol &symbol,
     const std::unordered_map<std::string, std::uint32_t> &sectionRvas,
-    const std::unordered_map<std::string, std::uint32_t> &externalSymbols,
-    std::uint32_t exitProcessThunkRva) {
+    const std::unordered_map<std::string, std::uint32_t> &externalSymbols) {
     if (symbol.sectionNumber > 0 &&
         static_cast<std::size_t>(symbol.sectionNumber) <= linkedObject.object.sections.size()) {
         const Section &section = linkedObject.object.sections[symbol.sectionNumber - 1];
@@ -415,9 +549,6 @@ std::uint32_t resolveRelocationTargetRva(
             throw std::runtime_error("unsupported target section in relocation: " + section.name);
         }
         return sectionRva->second + linkedObject.sectionOffsets[symbol.sectionNumber - 1] + symbol.value;
-    }
-    if (symbol.sectionNumber == UndefinedSection && symbol.name == "ExitProcess") {
-        return exitProcessThunkRva;
     }
     if (symbol.sectionNumber == UndefinedSection) {
         const auto found = externalSymbols.find(symbol.name);
@@ -434,7 +565,6 @@ void applyRelocations(
     const std::unordered_map<std::string, std::uint32_t> &sectionRvas,
     const std::unordered_map<std::string, std::uint32_t> &externalSymbols,
     SectionLayout &textLayout,
-    std::uint32_t exitProcessThunkRva,
     std::vector<RelocationTraceEntry> *traceEntries) {
     const ObjectFile &object = linkedObject.object;
     const std::size_t textSectionIndex = findTextSectionIndex(object);
@@ -455,8 +585,7 @@ void applyRelocations(
             linkedObject,
             symbol,
             sectionRvas,
-            externalSymbols,
-            exitProcessThunkRva);
+            externalSymbols);
 
         const std::uint32_t relocationRva =
             sectionRvas.at(".text") + linkedObject.sectionOffsets[textSectionIndex] + relocation.offset;
@@ -496,7 +625,6 @@ void applyInitializedDataRelocations(
     const std::unordered_map<std::string, std::uint32_t> &sectionRvas,
     const std::unordered_map<std::string, std::uint32_t> &externalSymbols,
     std::vector<SectionLayout> &layouts,
-    std::uint32_t exitProcessThunkRva,
     std::vector<RelocationTraceEntry> *traceEntries) {
     for (std::size_t sectionIndex = 0; sectionIndex < linkedObject.object.sections.size(); ++sectionIndex) {
         const Section &section = linkedObject.object.sections[sectionIndex];
@@ -533,8 +661,7 @@ void applyInitializedDataRelocations(
                 linkedObject,
                 symbol,
                 sectionRvas,
-                externalSymbols,
-                exitProcessThunkRva);
+                externalSymbols);
             const std::int64_t addend = readS64(layoutIt->bytes, mergedSectionOffset + relocation.offset);
             const std::uint64_t storedValue = static_cast<std::uint64_t>(
                 static_cast<std::int64_t>(ImageBase) +
@@ -560,17 +687,6 @@ void applyInitializedDataRelocations(
             write64(layoutIt->bytes, mergedSectionOffset + relocation.offset, storedValue);
         }
     }
-}
-
-void appendImportThunk(std::vector<std::uint8_t> &text, std::uint32_t thunkRva, std::uint32_t iatRva) {
-    text.push_back(0xff);
-    text.push_back(0x25);
-    const std::int64_t displacement = static_cast<std::int64_t>(iatRva) -
-        static_cast<std::int64_t>(thunkRva + 6);
-    if (displacement < INT32_MIN || displacement > INT32_MAX) {
-        throw std::runtime_error("import thunk displacement out of range");
-    }
-    append32(text, static_cast<std::uint32_t>(static_cast<std::int32_t>(displacement)));
 }
 
 void writeBytes(std::vector<std::uint8_t> &file, std::size_t offset, const std::vector<std::uint8_t> &bytes) {
@@ -646,6 +762,19 @@ std::vector<SectionLayout> mergeSections(std::vector<LinkedObject> &linkedObject
     return layouts;
 }
 
+std::unordered_map<std::string, bool> collectDefinedExternalNames(const std::vector<LinkedObject> &linkedObjects) {
+    std::unordered_map<std::string, bool> names;
+    for (const auto &linkedObject : linkedObjects) {
+        for (const auto &symbol : linkedObject.object.symbols) {
+            if (!isTraceableSymbol(symbol) || symbol.sectionNumber <= 0) {
+                continue;
+            }
+            names.emplace(symbol.name, true);
+        }
+    }
+    return names;
+}
+
 std::unordered_map<std::string, std::uint32_t> collectExternalSymbols(
     const std::vector<LinkedObject> &linkedObjects,
     const std::unordered_map<std::string, std::uint32_t> &sectionRvas,
@@ -680,7 +809,9 @@ std::unordered_map<std::string, std::uint32_t> collectExternalSymbols(
                     linkedObject.object.path,
                     section.name,
                     symbol.name,
+                    "",
                     rva,
+                    0,
                     false});
             }
         }
@@ -753,12 +884,18 @@ void traceResolvedSymbols(
     std::ostream &out,
     std::vector<ResolvedSymbolTraceEntry> entries,
     const ImportLayout &imports) {
-    entries.push_back(ResolvedSymbolTraceEntry{
-        {},
-        ".idata",
-        "ExitProcess",
-        imports.iatRva,
-        true});
+    for (const auto &group : imports.groups) {
+        for (const auto &symbol : group.symbols) {
+            entries.push_back(ResolvedSymbolTraceEntry{
+                {},
+                ".idata",
+                symbol.symbolName,
+                symbol.dllName,
+                symbol.thunkRva,
+                symbol.iatRva,
+                true});
+        }
+    }
     std::sort(
         entries.begin(),
         entries.end(),
@@ -771,9 +908,29 @@ void traceResolvedSymbols(
         out << "[link]   " << entry.name
             << " -> " << hex32(entry.rva);
         if (entry.imported) {
-            out << " import_iat";
+            out << " import_thunk"
+                << " dll=" << entry.importDllName
+                << " iat=" << hex32(entry.importIatRva);
         } else {
             out << " from " << entry.objectPath.string() << ":" << entry.sectionName;
+        }
+        out << '\n';
+    }
+}
+
+void traceImports(std::ostream &out, const ImportLayout &imports) {
+    out << "[link] imports\n";
+    if (imports.groups.empty()) {
+        out << "[link]   none\n";
+        return;
+    }
+    for (const auto &group : imports.groups) {
+        out << "[link]   dll " << group.dllName << ": ";
+        for (std::size_t i = 0; i < group.symbols.size(); ++i) {
+            if (i > 0) {
+                out << ", ";
+            }
+            out << group.symbols[i].symbolName;
         }
         out << '\n';
     }
@@ -821,8 +978,17 @@ void PeLinker::linkObjects(
         throw std::runtime_error("linked objects do not contain a .text section");
     }
 
-    const std::uint32_t thunkRva = FirstSectionRva + static_cast<std::uint32_t>(textLayout->bytes.size());
-    appendImportThunk(textLayout->bytes, thunkRva, 0);
+    const std::unordered_map<std::string, bool> definedSymbolNames =
+        collectDefinedExternalNames(linkedObjects);
+    std::vector<ImportLayout::Group> requestedImports =
+        buildRequestedImports(linkedObjects, definedSymbolNames);
+    for (auto &group : requestedImports) {
+        for (auto &symbol : group.symbols) {
+            const std::uint32_t thunkOffset = static_cast<std::uint32_t>(textLayout->bytes.size());
+            appendImportThunkPlaceholder(textLayout->bytes);
+            symbol.thunkRva = FirstSectionRva + thunkOffset;
+        }
+    }
     textLayout->virtualSize = static_cast<std::uint32_t>(textLayout->bytes.size());
 
     std::uint32_t nextRva = FirstSectionRva;
@@ -833,22 +999,26 @@ void PeLinker::linkObjects(
         sectionRvas.emplace(section.name, section.rva);
     }
 
-    const std::uint32_t idataRva = nextRva;
-    ImportLayout imports = buildImportLayout(idataRva);
-
-    const std::int64_t thunkDisplacement = static_cast<std::int64_t>(imports.iatRva) -
-        static_cast<std::int64_t>(thunkRva + 6);
-    write32(
-        textLayout->bytes,
-        textLayout->bytes.size() - 4,
-        static_cast<std::uint32_t>(static_cast<std::int32_t>(thunkDisplacement)));
-
     std::vector<ResolvedSymbolTraceEntry> resolvedSymbolTraceEntries;
-    const std::unordered_map<std::string, std::uint32_t> externalSymbols =
+    const std::unordered_map<std::string, std::uint32_t> definedSymbols =
         collectExternalSymbols(
             linkedObjects,
             sectionRvas,
             trace ? &resolvedSymbolTraceEntries : nullptr);
+
+    const std::uint32_t idataRva = nextRva;
+    ImportLayout imports = buildImportLayout(idataRva, std::move(requestedImports));
+    std::unordered_map<std::string, std::uint32_t> externalSymbols = definedSymbols;
+    for (const auto &group : imports.groups) {
+        for (const auto &symbol : group.symbols) {
+            const auto [it, inserted] = externalSymbols.emplace(symbol.symbolName, symbol.thunkRva);
+            if (!inserted) {
+                throw std::runtime_error("duplicate external symbol: " + symbol.symbolName);
+            }
+            const std::uint32_t thunkOffset = symbol.thunkRva - sectionRvas.at(".text");
+            patchImportThunkDisplacement(textLayout->bytes, thunkOffset, symbol.thunkRva, symbol.iatRva);
+        }
+    }
 
     const auto entry = externalSymbols.find("mainCRTStartup");
     if (entry == externalSymbols.end()) {
@@ -862,14 +1032,12 @@ void PeLinker::linkObjects(
             sectionRvas,
             externalSymbols,
             *textLayout,
-            thunkRva,
             trace ? &relocationTraceEntries : nullptr);
         applyInitializedDataRelocations(
             linkedObject,
             sectionRvas,
             externalSymbols,
             sections,
-            thunkRva,
             trace ? &relocationTraceEntries : nullptr);
     }
 
@@ -894,6 +1062,7 @@ void PeLinker::linkObjects(
 
     if (trace) {
         traceMergedSections(*trace, sections, idataRva, idataVirtualSize, idataRawPointer, idataRawSize);
+        traceImports(*trace, imports);
         traceResolvedSymbols(*trace, resolvedSymbolTraceEntries, imports);
         traceRelocations(*trace, relocationTraceEntries);
     }

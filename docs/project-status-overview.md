@@ -63,7 +63,9 @@ Current status:
   - `.bss`
 - cross-object external symbol resolution works
 - minimal import handling exists for `ExitProcess`
+- DLL-aware import grouping now exists for a small curated set across `kernel32.dll` and `msvcrt.dll`
 - `REL32` relocation handling works on the current supported path
+- function-address `ADDR64` relocations from `.data` into `.text` now work on the current compiler-generated path
 - `.bss` section-symbol plus addend behavior has been debugged and fixed
 - teaching-oriented `--link-trace` output now exposes:
   - input objects
@@ -107,7 +109,7 @@ This is not because the linker is low quality. It is because it now matters more
 The main weak spots are:
 
 - relocation coverage is still narrow
-- import handling is still minimal
+- import handling is still intentionally small even though it now covers multiple DLLs
 - compatibility with non-`minic` object producers is intentionally weak
 - failure diagnostics are functional but not yet systematic
 

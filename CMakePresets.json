@@ -29,7 +29,9 @@
         "outputOnFailure": true
       },
       "filter": {
-        "label": "phase-current"
+        "include": {
+          "label": "phase-current"
+        }
       }
     },
     {
@@ -42,6 +44,32 @@
       "filter": {
         "include": {
           "name": "minic_bss_integrity"
+        }
+      }
+    },
+    {
+      "name": "imports",
+      "configurePreset": "default",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "label": "imports"
+        }
+      }
+    },
+    {
+      "name": "relocations",
+      "configurePreset": "default",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "label": "relocations"
         }
       }
     }

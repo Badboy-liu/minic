@@ -34,6 +34,7 @@ private:
     void analyzeFunction(Function &function);
     void analyzeGlobal(GlobalVar &global);
     bool isSupportedGlobalPointerInitializer(const GlobalVar &global) const;
+    bool isSupportedGlobalPointerArrayInitializer(const GlobalVar &global) const;
     void analyzeBlock(BlockStmt &block);
     void analyzeStatement(Stmt &stmt);
     void analyzeExpr(Expr &expr);

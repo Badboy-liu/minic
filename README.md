@@ -30,10 +30,13 @@ The current compiler supports:
 
 - multiple `char` / `short` / `int` / `long` / `long long` / `void` functions
 - function declarations and later definitions
+- external function declarations resolved either from other input objects or the built-in import map
 - global integer variables
 - global `char[]` variables
 - global pointer initializers for `&global_object`
+- global pointer initializers for function names such as `int (*p)() = answer;`
 - global pointer initializers for string literals such as `char *p = "A";`
+- global function pointer arrays with initializer lists such as `int (*table[2])() = { one, two };`
 - tentative global definitions emitted via `.bss`
 - `void` functions
 - up to 4 `int` parameters per function
@@ -92,7 +95,15 @@ You can also compile multiple files into one executable:
 
 Each input file is compiled into its own NASM assembly file and object file. The built-in PE linker then resolves external function symbols across those objects, so functions defined in one `.c` file can be called from another `.c` file.
 
-Global variables are emitted into `.data` when initialized and `.bss` when they are uninitialized/tentative definitions. The built-in PE linker preserves section-relative offsets for NASM COFF `REL32` relocations, so multiple globals placed in `.bss` keep distinct addresses in the final executable. It also supports the current compiler's minimal `.data` `ADDR64` relocation path for global pointer initializers such as `int *p = &x;` and `char *p = "A";`.
+Global variables are emitted into `.data` when initialized and `.bss` when they are uninitialized/tentative definitions. The built-in PE linker preserves section-relative offsets for NASM COFF `REL32` relocations, so multiple globals placed in `.bss` keep distinct addresses in the final executable. It also supports the current compiler's minimal `.data` `ADDR64` relocation path for global pointer initializers such as `int *p = &x;`, `char *p = "A";`, `int (*fn_ptr)() = answer;`, and `int (*fn_table[2])() = { one, two };`.
+
+The linker now also supports a small teaching-oriented import map across multiple DLLs. Today that includes:
+
+- `kernel32.dll!ExitProcess`
+- `kernel32.dll!GetCurrentProcessId`
+- `msvcrt.dll!puts`
+
+That means ordinary external declarations such as `extern int puts(char *text);` can now link through the built-in PE import machinery without adding new source syntax.
 
 ## Quick Check
 
@@ -106,6 +117,18 @@ Fastest way to run only the `.bss` teaching case:
 
 ```powershell
 ctest --preset bss
+```
+
+Fastest way to run only the import teaching cases:
+
+```powershell
+ctest --preset imports
+```
+
+Fastest way to run only the relocation teaching cases:
+
+```powershell
+ctest --preset relocations
 ```
 
 ## Manual Verification
@@ -129,6 +152,7 @@ The trace prints:
 - input object summaries
 - object-level defined symbols and extern references
 - merged section layout
+- import groups by DLL
 - resolved symbols
 - applied `REL32` and minimal `ADDR64` relocations
 
@@ -163,13 +187,25 @@ To run a single example by test name:
 ctest --test-dir .\build -C Debug -R minic_bss_integrity --output-on-failure
 ```
 
+To run only the DLL-aware import regressions:
+
+```powershell
+ctest --preset imports
+```
+
+To run only the relocation-focused regressions:
+
+```powershell
+ctest --preset relocations
+```
+
 ## Notes
 
 This is intentionally a tiny compiler, not a full ISO C implementation.
 Current limits:
 
-- no general non-constant global initializers beyond `&global_object` and string-literal pointer forms
-- no general global array initializers beyond `char[] = "..."` string literals
+- no general non-constant global initializers beyond function names, `&function`, `&global_object`, and string-literal pointer forms
+- no general global array initializers beyond `char[] = "..."` and the minimal function-pointer-table subset
 - no local string literal initialization
 - no structs
 - only up to 4 parameters

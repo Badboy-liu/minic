@@ -18,10 +18,17 @@ param(
 
     [string]$RequiredTraceMarkers = "",
 
-    [string]$RequiredOutputMarkers = ""
+    [string]$RequiredOutputMarkers = "",
+
+    [switch]$ExpectCompilerFailure,
+
+    [string]$RequiredErrorMarkers = ""
 )
 
 $ErrorActionPreference = "Stop"
+if (Get-Variable PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
+    $PSNativeCommandUseErrorActionPreference = $false
+}
 
 function Split-List {
     param(
@@ -40,9 +47,18 @@ function Invoke-Compiler {
         [string[]]$Arguments
     )
 
-    $output = & $CompilerPath @Arguments 2>&1
-    if ($LASTEXITCODE -ne 0) {
+    $savedErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $output = & $CompilerPath @Arguments 2>&1
+    } finally {
+        $ErrorActionPreference = $savedErrorActionPreference
+    }
+    if (-not $ExpectCompilerFailure -and $LASTEXITCODE -ne 0) {
         throw "Compiler failed with exit code ${LASTEXITCODE}: $($Arguments -join ' ')"
+    }
+    if ($ExpectCompilerFailure -and $LASTEXITCODE -eq 0) {
+        throw "Compiler unexpectedly succeeded: $($Arguments -join ' ')"
     }
     return ($output | Out-String)
 }
@@ -83,6 +99,16 @@ foreach ($marker in (Split-List $RequiredOutputMarkers)) {
     if (-not $compilerOutput.Contains($marker)) {
         throw "Missing required compiler output marker '$marker'"
     }
+}
+
+foreach ($marker in (Split-List $RequiredErrorMarkers)) {
+    if (-not $compilerOutput.Contains($marker)) {
+        throw "Missing required compiler error marker '$marker'"
+    }
+}
+
+if ($ExpectCompilerFailure) {
+    exit 0
 }
 
 Assert-ExitCode (Join-Path $RepoRoot $OutputExe) $ExpectedExit

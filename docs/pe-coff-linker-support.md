@@ -18,7 +18,7 @@ The linker currently supports:
 - Windows AMD64 PE executable output
 - one or more NASM-generated AMD64 COFF object files
 - compiler-generated functions, globals, and entry point symbols
-- a minimal `kernel32.dll!ExitProcess` import
+- a small DLL-aware import map across `kernel32.dll` and `msvcrt.dll`
 
 The linker currently does not try to support:
 
@@ -120,6 +120,7 @@ A supported `ADDR64` relocation may currently target:
 
 - a compiler-generated global object address stored in `.data`
 - a compiler-generated string literal address stored in `.data`
+- a compiler-generated function address stored in `.data`
 
 ### Important detail: section symbol plus addend
 
@@ -141,6 +142,8 @@ The linker now supports the smallest data-side relocation subset needed by the c
 
 - `int *p = &x;`
 - `char *p = "A";`
+- `int (*p)() = f;`
+- `int (*table[2])() = { f, g };`
 
 In NASM-generated AMD64 COFF objects, those cases currently appear as:
 
@@ -161,14 +164,23 @@ The linker synthesizes a PE `.idata` section that provides:
 - import descriptor data
 - import lookup table data
 - import address table data
-- a single imported function name
-- the DLL name
+- one or more imported function names
+- one or more DLL names
+- import thunks in `.text` for imported call targets
 
-Currently the only hard-coded imported symbol is:
+Currently the curated import set is:
 
 - `ExitProcess` from `kernel32.dll`
+- `GetCurrentProcessId` from `kernel32.dll`
+- `puts` from `msvcrt.dll`
 
-This is enough for the compiler-generated `mainCRTStartup` wrapper to terminate the process with the return value from `main`.
+This is enough to demonstrate:
+
+- the compiler-generated `mainCRTStartup` wrapper terminating through `ExitProcess`
+- a minimal imported Win32 API call
+- a minimal imported C runtime call
+
+The mapping is still built into the linker. It is not user-configurable source syntax yet.
 
 ## Executable Layout Model
 
@@ -209,8 +221,9 @@ The trace prints four high-level blocks:
 
 1. input objects
 2. merged sections
-3. resolved symbols
-4. relocations
+3. imports
+4. resolved symbols
+5. relocations
 
 The trace is meant to explain what the linker is doing, not to dump the entire binary.
 
@@ -255,6 +268,8 @@ The regression currently covers:
 - `.bss` integrity with `--link-trace`
 - multi-object PE linking with `--link-trace`
 - global pointer initializer relocations with `--link-trace`
+- function-pointer and function-pointer-table relocations with `--link-trace`
+- DLL-aware imports from `kernel32.dll` and `msvcrt.dll`
 
 Each regression case is declared in `CMakeLists.txt`, where the test lists:
 

@@ -121,8 +121,8 @@ void CodeGenerator::emitGlobals() {
         if (global.type->isArray()) {
             const auto *stringExpr = global.init ? dynamic_cast<const StringExpr *>(global.init.get()) : nullptr;
             std::ostringstream line;
-            line << global.symbolName << ": db ";
             if (stringExpr) {
+                line << global.symbolName << ": db ";
                 for (std::size_t i = 0; i < stringExpr->value.size(); ++i) {
                     if (i > 0) {
                         line << ", ";
@@ -137,7 +137,27 @@ void CodeGenerator::emitGlobals() {
                 for (int i = 0; i < padding; ++i) {
                     line << ", 0";
                 }
+            } else if (global.init && global.init->kind == Expr::Kind::InitializerList &&
+                global.type->elementType->isPointer()) {
+                line << global.symbolName << ": dq ";
+                const auto &list = static_cast<const InitializerListExpr &>(*global.init);
+                bool first = true;
+                for (const auto &element : list.elements) {
+                    if (!first) {
+                        line << ", ";
+                    }
+                    line << globalAddressInitializer(*element);
+                    first = false;
+                }
+                for (std::size_t i = list.elements.size(); i < static_cast<std::size_t>(global.type->arrayLength); ++i) {
+                    if (!first) {
+                        line << ", ";
+                    }
+                    line << "0";
+                    first = false;
+                }
             } else {
+                line << global.symbolName << ": db ";
                 for (int i = 0; i < global.type->arrayLength; ++i) {
                     if (i > 0) {
                         line << ", ";
@@ -152,14 +172,7 @@ void CodeGenerator::emitGlobals() {
         if (global.type->isPointer() && global.init) {
             std::ostringstream line;
             line << global.symbolName << ": dq ";
-            if (global.init->kind == Expr::Kind::String) {
-                const auto &stringExpr = static_cast<const StringExpr &>(*global.init);
-                line << stringLabel(stringExpr.value);
-            } else {
-                const auto &unary = static_cast<const UnaryExpr &>(*global.init);
-                const auto &variable = static_cast<const VariableExpr &>(*unary.operand);
-                line << variable.symbolName;
-            }
+            line << globalAddressInitializer(*global.init);
             emitDataLine(line.str());
             continue;
         }
@@ -394,7 +407,7 @@ void CodeGenerator::emitExpr(const Expr &expr) {
     }
     case Expr::Kind::Variable:
         emitAddress(expr);
-        if (expr.type->isArray()) {
+        if (expr.type->isArray() || expr.type->isFunction()) {
             return;
         }
         emitLoad(*expr.type);
@@ -420,6 +433,9 @@ void CodeGenerator::emitExpr(const Expr &expr) {
             return;
         case UnaryOp::Dereference:
             emitAddress(expr);
+            if (expr.type->isFunction()) {
+                return;
+            }
             emitLoad(*expr.type);
             return;
         }
@@ -451,7 +467,9 @@ void CodeGenerator::emitExpr(const Expr &expr) {
         if (target == TargetKind::WindowsX64) {
             emitLine("    sub rsp, 32");
         }
-        emitLine("    call " + functionSymbol(call.callee));
+        emitExpr(*call.callee);
+        emitLine("    mov r11, rax");
+        emitLine("    call r11");
         if (target == TargetKind::WindowsX64) {
             emitLine("    add rsp, 32");
         }
@@ -459,6 +477,9 @@ void CodeGenerator::emitExpr(const Expr &expr) {
     }
     case Expr::Kind::Index:
         emitAddress(expr);
+        if (expr.type->isFunction()) {
+            return;
+        }
         emitLoad(*expr.type);
         return;
     case Expr::Kind::Binary: {
@@ -606,6 +627,19 @@ void CodeGenerator::emitAddress(const Expr &expr) {
     default:
         throw std::runtime_error("internal code generation error");
     }
+}
+
+std::string CodeGenerator::globalAddressInitializer(const Expr &expr) {
+    if (expr.kind == Expr::Kind::String) {
+        const auto &stringExpr = static_cast<const StringExpr &>(expr);
+        return stringLabel(stringExpr.value);
+    }
+    if (expr.kind == Expr::Kind::Variable) {
+        return static_cast<const VariableExpr &>(expr).symbolName;
+    }
+    const auto &unary = static_cast<const UnaryExpr &>(expr);
+    const auto &variable = static_cast<const VariableExpr &>(*unary.operand);
+    return variable.symbolName;
 }
 
 void CodeGenerator::emitLoad(const Type &type) {

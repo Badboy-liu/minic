@@ -11,6 +11,7 @@ enum class TypeKind {
     Long,
     LongLong,
     Void,
+    Function,
     Pointer,
     Array
 };
@@ -22,42 +23,62 @@ struct Type {
     TypeKind kind;
     TypePtr elementType;
     int arrayLength = 0;
+    std::vector<TypePtr> parameterTypes;
 
     static TypePtr makeInt() {
-        return std::make_shared<Type>(Type{TypeKind::Int, nullptr, 0});
+        return std::make_shared<Type>(Type{TypeKind::Int, nullptr, 0, {}});
     }
 
     static TypePtr makeChar() {
-        return std::make_shared<Type>(Type{TypeKind::Char, nullptr, 0});
+        return std::make_shared<Type>(Type{TypeKind::Char, nullptr, 0, {}});
     }
 
     static TypePtr makeShort() {
-        return std::make_shared<Type>(Type{TypeKind::Short, nullptr, 0});
+        return std::make_shared<Type>(Type{TypeKind::Short, nullptr, 0, {}});
     }
 
     static TypePtr makeLong() {
-        return std::make_shared<Type>(Type{TypeKind::Long, nullptr, 0});
+        return std::make_shared<Type>(Type{TypeKind::Long, nullptr, 0, {}});
     }
 
     static TypePtr makeLongLong() {
-        return std::make_shared<Type>(Type{TypeKind::LongLong, nullptr, 0});
+        return std::make_shared<Type>(Type{TypeKind::LongLong, nullptr, 0, {}});
     }
 
     static TypePtr makeVoid() {
-        return std::make_shared<Type>(Type{TypeKind::Void, nullptr, 0});
+        return std::make_shared<Type>(Type{TypeKind::Void, nullptr, 0, {}});
+    }
+
+    static TypePtr makeFunction(TypePtr returnType, std::vector<TypePtr> parameterTypesValue) {
+        return std::make_shared<Type>(Type{
+            TypeKind::Function,
+            std::move(returnType),
+            0,
+            std::move(parameterTypesValue)});
     }
 
     static TypePtr makePointer(TypePtr element) {
-        return std::make_shared<Type>(Type{TypeKind::Pointer, std::move(element), 0});
+        return std::make_shared<Type>(Type{TypeKind::Pointer, std::move(element), 0, {}});
     }
 
     static TypePtr makeArray(TypePtr element, int length) {
-        return std::make_shared<Type>(Type{TypeKind::Array, std::move(element), length});
+        return std::make_shared<Type>(Type{TypeKind::Array, std::move(element), length, {}});
     }
 
     bool equals(const Type &other) const {
-        if (kind != other.kind || arrayLength != other.arrayLength) {
+        if (kind != other.kind || arrayLength != other.arrayLength || parameterTypes.size() != other.parameterTypes.size()) {
             return false;
+        }
+        for (std::size_t i = 0; i < parameterTypes.size(); ++i) {
+            if (!parameterTypes[i] || !other.parameterTypes[i]) {
+                if (parameterTypes[i] || other.parameterTypes[i]) {
+                    return false;
+                }
+                continue;
+            }
+            if (!parameterTypes[i]->equals(*other.parameterTypes[i])) {
+                return false;
+            }
         }
         if (!elementType && !other.elementType) {
             return true;
@@ -84,6 +105,10 @@ struct Type {
         return kind == TypeKind::Pointer;
     }
 
+    bool isFunction() const {
+        return kind == TypeKind::Function;
+    }
+
     bool isArray() const {
         return kind == TypeKind::Array;
     }
@@ -104,6 +129,7 @@ struct Type {
         case TypeKind::LongLong:
             return 8;
         case TypeKind::Void:
+        case TypeKind::Function:
             return 0;
         case TypeKind::Pointer:
             return 8;
@@ -123,6 +149,9 @@ struct Type {
     TypePtr decay() const {
         if (kind == TypeKind::Array) {
             return makePointer(elementType);
+        }
+        if (kind == TypeKind::Function) {
+            return makePointer(std::make_shared<Type>(*this));
         }
         return std::make_shared<Type>(*this);
     }
@@ -158,6 +187,7 @@ struct Expr {
         Variable,
         Unary,
         Binary,
+        InitializerList,
         Assign,
         Call,
         Index
@@ -219,11 +249,18 @@ struct AssignExpr : Expr {
     std::unique_ptr<Expr> value;
 };
 
+struct InitializerListExpr : Expr {
+    explicit InitializerListExpr(std::vector<std::unique_ptr<Expr>> elementsValue)
+        : Expr(Kind::InitializerList), elements(std::move(elementsValue)) {}
+
+    std::vector<std::unique_ptr<Expr>> elements;
+};
+
 struct CallExpr : Expr {
-    CallExpr(std::string calleeValue, std::vector<std::unique_ptr<Expr>> argumentsValue)
+    CallExpr(std::unique_ptr<Expr> calleeValue, std::vector<std::unique_ptr<Expr>> argumentsValue)
         : Expr(Kind::Call), callee(std::move(calleeValue)), arguments(std::move(argumentsValue)) {}
 
-    std::string callee;
+    std::unique_ptr<Expr> callee;
     std::vector<std::unique_ptr<Expr>> arguments;
     std::vector<TypePtr> parameterTypes;
 };

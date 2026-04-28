@@ -2,15 +2,19 @@
 
 #include <stdexcept>
 
+namespace {
+
+std::string functionSymbol(const std::string &name) {
+    return "fn_" + name;
+}
+
+}
+
 void SemanticAnalyzer::analyze(Program &program) {
     bool hasMain = false;
     functions.clear();
     globals.clear();
     globalSignatures.clear();
-
-    for (auto &global : program.globals) {
-        analyzeGlobal(global);
-    }
 
     for (const auto &function : program.functions) {
         FunctionSignature signature;
@@ -56,6 +60,20 @@ void SemanticAnalyzer::analyze(Program &program) {
         }
     }
 
+    for (const auto &function : program.functions) {
+        globals.emplace(
+            function.name,
+            VariableSymbol{
+                Type::makeFunction(function.returnType, functions.at(function.name).parameterTypes),
+                0,
+                true,
+                functionSymbol(function.name)});
+    }
+
+    for (auto &global : program.globals) {
+        analyzeGlobal(global);
+    }
+
     for (auto &function : program.functions) {
         if (!function.isDeclaration()) {
             analyzeFunction(function);
@@ -76,7 +94,7 @@ void SemanticAnalyzer::analyzeFunction(Function &function) {
     enterScope();
     for (auto &parameter : function.parameters) {
         auto &scope = scopes.back();
-        if (parameter.type->isVoid() || parameter.type->isArray()) {
+        if (parameter.type->isVoid() || parameter.type->isArray() || parameter.type->isFunction()) {
             fail("unsupported parameter type in function " + function.name + ": " + typeName(parameter.type));
         }
         if (scope.find(parameter.name) != scope.end()) {
@@ -93,7 +111,10 @@ void SemanticAnalyzer::analyzeFunction(Function &function) {
 }
 
 void SemanticAnalyzer::analyzeGlobal(GlobalVar &global) {
-    if (global.type->isVoid()) {
+    if (functions.find(global.name) != functions.end()) {
+        fail("global variable conflicts with function: " + global.name);
+    }
+    if (global.type->isVoid() || global.type->isFunction()) {
         fail("global variable cannot have type void: " + global.name);
     }
     if (global.type->isArray()) {
@@ -151,13 +172,18 @@ void SemanticAnalyzer::analyzeGlobal(GlobalVar &global) {
 
     analyzeExpr(*global.init);
     if (global.type->isArray()) {
-        if (global.init->kind != Expr::Kind::String ||
-            !global.type->elementType->equals(*Type::makeChar())) {
-            fail("global array initializers currently support only string literals for char[]: " + global.name);
+        if (global.init->kind == Expr::Kind::String &&
+            global.type->elementType->equals(*Type::makeChar())) {
+            const auto &stringExpr = static_cast<const StringExpr &>(*global.init);
+            if (static_cast<int>(stringExpr.value.size()) + 1 > global.type->arrayLength) {
+                fail("string literal is too long for global array: " + global.name);
+            }
+            return;
         }
-        const auto &stringExpr = static_cast<const StringExpr &>(*global.init);
-        if (static_cast<int>(stringExpr.value.size()) + 1 > global.type->arrayLength) {
-            fail("string literal is too long for global array: " + global.name);
+        if (!isSupportedGlobalPointerArrayInitializer(global)) {
+            fail(
+                "global array initializers currently support only string literals for char[] or pointer initializer lists: " +
+                global.name);
         }
         return;
     }
@@ -165,7 +191,7 @@ void SemanticAnalyzer::analyzeGlobal(GlobalVar &global) {
     if (global.type->isPointer()) {
         if (!isSupportedGlobalPointerInitializer(global)) {
             fail(
-                "global pointer initializers currently support only '&global' or string literals: " +
+                "global pointer initializers currently support only function names, '&function', '&global', or string literals: " +
                 global.name);
         }
         return;
@@ -178,6 +204,10 @@ void SemanticAnalyzer::analyzeGlobal(GlobalVar &global) {
 
 bool SemanticAnalyzer::isSupportedGlobalPointerInitializer(const GlobalVar &global) const {
     if (global.init->kind == Expr::Kind::String) {
+        return canAssign(global.type, global.init->type);
+    }
+
+    if (global.init->kind == Expr::Kind::Variable) {
         return canAssign(global.type, global.init->type);
     }
 
@@ -199,6 +229,22 @@ bool SemanticAnalyzer::isSupportedGlobalPointerInitializer(const GlobalVar &glob
     }
 
     return canAssign(global.type, global.init->type);
+}
+
+bool SemanticAnalyzer::isSupportedGlobalPointerArrayInitializer(const GlobalVar &global) const {
+    if (!global.type->elementType->isPointer() || global.init->kind != Expr::Kind::InitializerList) {
+        return false;
+    }
+    const auto &list = static_cast<const InitializerListExpr &>(*global.init);
+    if (static_cast<int>(list.elements.size()) > global.type->arrayLength) {
+        fail("too many elements in global array initializer: " + global.name);
+    }
+    for (const auto &element : list.elements) {
+        if (!canAssign(global.type->elementType, element->type)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void SemanticAnalyzer::analyzeBlock(BlockStmt &block) {
@@ -324,9 +370,9 @@ void SemanticAnalyzer::analyzeExpr(Expr &expr) {
         variable.type = symbol.type;
         variable.isGlobal = symbol.isGlobal;
         variable.symbolName = symbol.symbolName;
-        variable.isLValue = true;
+        variable.isLValue = !symbol.type->isFunction();
         expr.type = symbol.type;
-        expr.isLValue = true;
+        expr.isLValue = !symbol.type->isFunction();
         return;
     }
     case Expr::Kind::Unary: {
@@ -349,7 +395,7 @@ void SemanticAnalyzer::analyzeExpr(Expr &expr) {
             expr.isLValue = false;
             return;
         case UnaryOp::AddressOf:
-            if (!unary.operand->isLValue) {
+            if (!unary.operand->isLValue && !unary.operand->type->isFunction()) {
                 fail("address-of requires an lvalue");
             }
             expr.type = Type::makePointer(unary.operand->type);
@@ -361,7 +407,7 @@ void SemanticAnalyzer::analyzeExpr(Expr &expr) {
                 fail("dereference requires pointer operand");
             }
             expr.type = operandType->elementType;
-            expr.isLValue = true;
+            expr.isLValue = !expr.type->isFunction();
             return;
         }
         }
@@ -434,6 +480,15 @@ void SemanticAnalyzer::analyzeExpr(Expr &expr) {
         }
         return;
     }
+    case Expr::Kind::InitializerList: {
+        auto &list = static_cast<InitializerListExpr &>(expr);
+        for (auto &element : list.elements) {
+            analyzeExpr(*element);
+        }
+        expr.type = Type::makeVoid();
+        expr.isLValue = false;
+        return;
+    }
     case Expr::Kind::Assign: {
         auto &assign = static_cast<AssignExpr &>(expr);
         analyzeExpr(*assign.target);
@@ -453,25 +508,31 @@ void SemanticAnalyzer::analyzeExpr(Expr &expr) {
     }
     case Expr::Kind::Call: {
         auto &call = static_cast<CallExpr &>(expr);
-        const auto found = functions.find(call.callee);
-        if (found == functions.end()) {
-            fail("call to undefined function: " + call.callee);
+        analyzeExpr(*call.callee);
+        TypePtr calleeType = decayType(call.callee->type);
+        TypePtr functionType;
+        if (calleeType->isFunction()) {
+            functionType = calleeType;
+        } else if (calleeType->isPointer() && calleeType->elementType->isFunction()) {
+            functionType = calleeType->elementType;
+        } else {
+            fail("call target must be a function or function pointer");
         }
-        if (call.arguments.size() != found->second.parameterTypes.size()) {
+        if (call.arguments.size() != functionType->parameterTypes.size()) {
             fail(
-                "wrong number of arguments in call to " + call.callee + ": expected " +
-                std::to_string(found->second.parameterTypes.size()) + ", got " + std::to_string(call.arguments.size()));
+                "wrong number of arguments in function call: expected " +
+                std::to_string(functionType->parameterTypes.size()) + ", got " + std::to_string(call.arguments.size()));
         }
-        call.parameterTypes = found->second.parameterTypes;
+        call.parameterTypes = functionType->parameterTypes;
         for (std::size_t i = 0; i < call.arguments.size(); ++i) {
             analyzeExpr(*call.arguments[i]);
-            if (!isEquivalentArgumentType(found->second.parameterTypes[i], call.arguments[i]->type)) {
+            if (!isEquivalentArgumentType(functionType->parameterTypes[i], call.arguments[i]->type)) {
                 fail(
-                    "argument type mismatch in call to " + call.callee + ": expected " +
-                    typeName(found->second.parameterTypes[i]) + ", got " + typeName(call.arguments[i]->type));
+                    "argument type mismatch in function call: expected " +
+                    typeName(functionType->parameterTypes[i]) + ", got " + typeName(call.arguments[i]->type));
             }
         }
-        expr.type = found->second.returnType;
+        expr.type = functionType->elementType;
         expr.isLValue = false;
         return;
     }
@@ -509,6 +570,9 @@ void SemanticAnalyzer::declareVariable(DeclStmt &decl) {
     if (decl.type->isVoid()) {
         fail("variable cannot have type void: " + decl.name);
     }
+    if (decl.type->isFunction()) {
+        fail("variable cannot have function type: " + decl.name);
+    }
     if (decl.type->isArray()) {
         if (decl.type->elementType->isVoid() || decl.type->arrayLength <= 0) {
             fail("only positive-length local arrays with non-void elements are supported: " + decl.name);
@@ -531,6 +595,15 @@ VariableSymbol SemanticAnalyzer::resolveVariable(const std::string &name) const 
     const auto global = globals.find(name);
     if (global != globals.end()) {
         return global->second;
+    }
+
+    const auto function = functions.find(name);
+    if (function != functions.end()) {
+        return VariableSymbol{
+            Type::makeFunction(function->second.returnType, function->second.parameterTypes),
+            0,
+            true,
+            functionSymbol(name)};
     }
 
     fail("use of undeclared variable: " + name);
@@ -574,6 +647,17 @@ std::string SemanticAnalyzer::typeName(const TypePtr &type) const {
         return "long long";
     case TypeKind::Void:
         return "void";
+    case TypeKind::Function: {
+        std::string result = typeName(type->elementType) + " (";
+        for (std::size_t i = 0; i < type->parameterTypes.size(); ++i) {
+            if (i > 0) {
+                result += ", ";
+            }
+            result += typeName(type->parameterTypes[i]);
+        }
+        result += ")";
+        return result;
+    }
     case TypeKind::Pointer:
         return typeName(type->elementType) + "*";
     case TypeKind::Array:

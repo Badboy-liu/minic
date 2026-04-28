@@ -49,6 +49,8 @@ Today the built-in PE linker does not claim support for:
 | Access adjacent global inside a section | `lea rax, [rel gv_name]` with section-relative addend in object | `REL32` from `.text` to section symbol plus addend | Supported | Required for `.bss` and similar packed globals |
 | Store global object address in initialized pointer data | `gv_p: dq gv_x` | `ADDR64` from `.data` to `.bss` or `.data` | Supported | Required for `int *p = &x;` |
 | Store string literal address in initialized pointer data | `gv_p: dq str_n` | `ADDR64` from `.data` to `.rdata` | Supported | Required for `char *p = "A";` |
+| Store function address in initialized pointer data | `gv_p: dq fn_name` | `ADDR64` from `.data` to `.text` | Supported | Required for `int (*p)() = f;` |
+| Store a small function-pointer table in initialized data | `gv_table: dq fn_a, fn_b` | repeated `ADDR64` from `.data` to `.text` | Supported | Required for minimal dispatch-table style programs |
 | Address local stack object | `lea rax, [rbp-offset]` | no object relocation | Not applicable | Pure frame-relative addressing |
 | Arithmetic on a pointer already in a register | `add/sub/imul` around runtime pointer values | no object relocation | Not applicable | Runtime address math only |
 
@@ -69,11 +71,16 @@ The following current examples exercise the supported relocation set:
   - `.data -> .bss` via `ADDR64`
 - `input/tmp_global_ptr_to_string.c`
   - `.data -> .rdata` via `ADDR64`
+- `input/tmp_function_ptr_global.c`
+  - `.data -> .text` via `ADDR64`
+- `input/tmp_function_ptr_table.c`
+  - repeated `.data -> .text` via `ADDR64`
 
 The current `--link-trace` output confirms that these cases reduce to:
 
 - `REL32` for code references from `.text`
 - `ADDR64` for the minimal initialized-data pointer cases
+- `ADDR64` for the minimal initialized-data function-pointer cases
 
 ## What This Means
 

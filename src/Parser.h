@@ -4,6 +4,7 @@
 #include "Token.h"
 
 #include <cstddef>
+#include <optional>
 #include <memory>
 #include <vector>
 
@@ -14,12 +15,20 @@ public:
     Program parseProgram();
 
 private:
+    struct ParsedDeclarator {
+        std::string name;
+        TypePtr type;
+    };
+
     void parseExternalDeclaration(Program &program);
     Function parseFunction(TypePtr returnType, std::string name);
     GlobalVar parseGlobalVariable(TypePtr declaredType, std::string name, bool isExternStorage);
     TypePtr parseType();
     TypePtr parseBaseType();
     TypePtr parseTypeSuffix(TypePtr baseType);
+    ParsedDeclarator parseVariableDeclarator(TypePtr declaredType);
+    std::vector<TypePtr> parseFunctionTypeParameters();
+    std::unique_ptr<Expr> parseInitializer();
     std::unique_ptr<BlockStmt> parseBlock();
     std::unique_ptr<Stmt> parseStatement();
     std::unique_ptr<Stmt> parseForStatement();

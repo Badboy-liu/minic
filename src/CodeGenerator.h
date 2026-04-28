@@ -30,6 +30,7 @@ private:
     void emitStatement(const Stmt &stmt);
     void emitExpr(const Expr &expr);
     void emitAddress(const Expr &expr);
+    std::string globalAddressInitializer(const Expr &expr);
     void emitLoad(const Type &type);
     void emitStore(const Type &type);
     int pointeeSize(const Type &type) const;

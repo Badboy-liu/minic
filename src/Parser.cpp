@@ -17,13 +17,28 @@ Program Parser::parseProgram() {
 
 void Parser::parseExternalDeclaration(Program &program) {
     const bool isExternStorage = match(TokenKind::KeywordExtern);
-    TypePtr baseType = parseType();
-    const Token &nameToken = consume(TokenKind::Identifier, "expected identifier");
-    if (check(TokenKind::LeftParen)) {
-        program.functions.push_back(parseFunction(std::move(baseType), nameToken.lexeme));
+    TypePtr baseType = parseBaseType();
+
+    if (check(TokenKind::Identifier)) {
+        const Token &nameToken = consume(TokenKind::Identifier, "expected identifier");
+        if (check(TokenKind::LeftParen)) {
+            program.functions.push_back(parseFunction(std::move(baseType), nameToken.lexeme));
+            return;
+        }
+        program.globals.push_back(parseGlobalVariable(std::move(baseType), nameToken.lexeme, isExternStorage));
         return;
     }
-    program.globals.push_back(parseGlobalVariable(std::move(baseType), nameToken.lexeme, isExternStorage));
+
+    ParsedDeclarator declarator = parseVariableDeclarator(std::move(baseType));
+    GlobalVar global;
+    global.type = std::move(declarator.type);
+    global.name = std::move(declarator.name);
+    global.isExternStorage = isExternStorage;
+    if (match(TokenKind::Equal)) {
+        global.init = parseInitializer();
+    }
+    consume(TokenKind::Semicolon, "expected ';' after global declaration");
+    program.globals.push_back(std::move(global));
 }
 
 Function Parser::parseFunction(TypePtr returnType, std::string name) {
@@ -72,7 +87,7 @@ GlobalVar Parser::parseGlobalVariable(TypePtr declaredType, std::string name, bo
     global.isExternStorage = isExternStorage;
 
     if (match(TokenKind::Equal)) {
-        global.init = parseExpression();
+        global.init = parseInitializer();
     }
     consume(TokenKind::Semicolon, "expected ';' after global declaration");
     return global;
@@ -93,6 +108,113 @@ TypePtr Parser::parseTypeSuffix(TypePtr baseType) {
         return Type::makeArray(std::move(baseType), lengthToken.intValue);
     }
     return baseType;
+}
+
+Parser::ParsedDeclarator Parser::parseVariableDeclarator(TypePtr declaredType) {
+    int pointerDepth = 0;
+    while (match(TokenKind::Star)) {
+        ++pointerDepth;
+    }
+
+    if (check(TokenKind::Identifier)) {
+        const Token &nameToken = consume(TokenKind::Identifier, "expected variable name");
+        TypePtr type = std::move(declaredType);
+        for (int i = 0; i < pointerDepth; ++i) {
+            type = Type::makePointer(std::move(type));
+        }
+        return ParsedDeclarator{nameToken.lexeme, parseTypeSuffix(std::move(type))};
+    }
+
+    if (pointerDepth > 0) {
+        fail(peek(), "grouped declarator required after pointer prefix");
+    }
+
+    consume(TokenKind::LeftParen, "expected '(' in declarator");
+    int groupedPointerDepth = 0;
+    while (match(TokenKind::Star)) {
+        ++groupedPointerDepth;
+    }
+    const Token &nameToken = consume(TokenKind::Identifier, "expected variable name");
+
+    bool hasArraySuffix = false;
+    int arrayLength = 0;
+    if (match(TokenKind::LeftBracket)) {
+        const Token &lengthToken = consume(TokenKind::Number, "expected array length");
+        consume(TokenKind::RightBracket, "expected ']' after array length");
+        hasArraySuffix = true;
+        arrayLength = lengthToken.intValue;
+    }
+
+    consume(TokenKind::RightParen, "expected ')' after declarator");
+
+    TypePtr type = std::move(declaredType);
+    for (int i = 0; i < pointerDepth; ++i) {
+        type = Type::makePointer(std::move(type));
+    }
+    if (match(TokenKind::LeftParen)) {
+        type = Type::makeFunction(std::move(type), parseFunctionTypeParameters());
+        consume(TokenKind::RightParen, "expected ')' after function pointer parameters");
+    }
+    for (int i = 0; i < groupedPointerDepth; ++i) {
+        type = Type::makePointer(std::move(type));
+    }
+    if (hasArraySuffix) {
+        type = Type::makeArray(std::move(type), arrayLength);
+    }
+
+    return ParsedDeclarator{nameToken.lexeme, std::move(type)};
+}
+
+std::vector<TypePtr> Parser::parseFunctionTypeParameters() {
+    std::vector<TypePtr> parameters;
+    if (check(TokenKind::RightParen)) {
+        return parameters;
+    }
+
+    if (check(TokenKind::KeywordVoid)) {
+        TypePtr probe = parseBaseType();
+        if (check(TokenKind::RightParen)) {
+            return parameters;
+        }
+        while (match(TokenKind::Star)) {
+            probe = Type::makePointer(probe);
+        }
+        if (check(TokenKind::Identifier)) {
+            advance();
+        }
+        parameters.push_back(std::move(probe));
+    } else {
+        TypePtr paramType = parseType();
+        if (check(TokenKind::Identifier)) {
+            advance();
+        }
+        parameters.push_back(std::move(paramType));
+    }
+
+    while (match(TokenKind::Comma)) {
+        TypePtr paramType = parseType();
+        if (check(TokenKind::Identifier)) {
+            advance();
+        }
+        parameters.push_back(std::move(paramType));
+    }
+
+    return parameters;
+}
+
+std::unique_ptr<Expr> Parser::parseInitializer() {
+    if (!match(TokenKind::LeftBrace)) {
+        return parseExpression();
+    }
+
+    std::vector<std::unique_ptr<Expr>> elements;
+    if (!check(TokenKind::RightBrace)) {
+        do {
+            elements.push_back(parseExpression());
+        } while (match(TokenKind::Comma));
+    }
+    consume(TokenKind::RightBrace, "expected '}' after initializer list");
+    return std::make_unique<InitializerListExpr>(std::move(elements));
 }
 
 TypePtr Parser::parseBaseType() {
@@ -200,15 +322,17 @@ std::unique_ptr<Stmt> Parser::parseReturnStatement() {
 }
 
 std::unique_ptr<Stmt> Parser::parseDeclaration(TypePtr declaredType) {
-    const Token &nameToken = consume(TokenKind::Identifier, "expected variable name");
-    TypePtr type = parseTypeSuffix(std::move(declaredType));
+    ParsedDeclarator declarator = parseVariableDeclarator(std::move(declaredType));
 
     std::unique_ptr<Expr> initializer;
     if (match(TokenKind::Equal)) {
-        initializer = parseExpression();
+        initializer = parseInitializer();
     }
     consume(TokenKind::Semicolon, "expected ';' after declaration");
-    return std::make_unique<DeclStmt>(std::move(type), nameToken.lexeme, std::move(initializer));
+    return std::make_unique<DeclStmt>(
+        std::move(declarator.type),
+        std::move(declarator.name),
+        std::move(initializer));
 }
 
 std::unique_ptr<Stmt> Parser::parseIfStatement() {
@@ -375,11 +499,6 @@ std::unique_ptr<Expr> Parser::parsePostfix() {
 
     while (true) {
         if (match(TokenKind::LeftParen)) {
-            if (expr->kind != Expr::Kind::Variable) {
-                fail(previous(), "function call target must be an identifier");
-            }
-
-            auto *callee = static_cast<VariableExpr *>(expr.get());
             std::vector<std::unique_ptr<Expr>> arguments;
             if (!check(TokenKind::RightParen)) {
                 do {
@@ -387,7 +506,7 @@ std::unique_ptr<Expr> Parser::parsePostfix() {
                 } while (match(TokenKind::Comma));
             }
             consume(TokenKind::RightParen, "expected ')' after function arguments");
-            expr = std::make_unique<CallExpr>(callee->name, std::move(arguments));
+            expr = std::make_unique<CallExpr>(std::move(expr), std::move(arguments));
             continue;
         }
 
