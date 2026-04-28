@@ -19,5 +19,31 @@
       "configurePreset": "default",
       "configuration": "Debug"
     }
+  ],
+  "testPresets": [
+    {
+      "name": "phase-current",
+      "configurePreset": "default",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "filter": {
+        "label": "phase-current"
+      }
+    },
+    {
+      "name": "bss",
+      "configurePreset": "default",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "name": "minic_bss_integrity"
+        }
+      }
+    }
   ]
 }

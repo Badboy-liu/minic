@@ -6,6 +6,7 @@
 
 #include <cstdlib>
 #include <filesystem>
+#include <iostream>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -55,14 +56,15 @@ void Toolchain::assembleObject(
 void Toolchain::linkObjects(
     TargetKind target,
     const std::vector<fs::path> &objPaths,
-    const fs::path &exePath) {
+    const fs::path &exePath,
+    bool traceLinker) {
     if (target != TargetKind::WindowsX64) {
         throw std::runtime_error(
             std::string("linking is not implemented yet for target ") + targetName(target) +
             "; use -S or -c to generate portable assembly/object output");
     }
 
-    PeLinker::linkObjects(objPaths, exePath);
+    PeLinker::linkObjects(objPaths, exePath, traceLinker ? &std::cout : nullptr);
 }
 
 fs::path Toolchain::findExecutableOnPath(const std::string &name) {

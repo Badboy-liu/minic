@@ -6,6 +6,8 @@
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <ostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -16,6 +18,7 @@ namespace fs = std::filesystem;
 
 namespace {
 constexpr std::uint16_t MachineAmd64 = 0x8664;
+constexpr std::uint16_t RelAmd64Addr64 = 0x0001;
 constexpr std::uint16_t RelAmd64Rel32 = 0x0004;
 constexpr std::int16_t UndefinedSection = 0;
 constexpr std::uint8_t StorageClassExternal = 2;
@@ -81,8 +84,69 @@ struct ImportLayout {
     std::vector<std::uint8_t> bytes;
 };
 
+struct ResolvedSymbolTraceEntry {
+    fs::path objectPath;
+    std::string sectionName;
+    std::string name;
+    std::uint32_t rva = 0;
+    bool imported = false;
+};
+
+struct RelocationTraceEntry {
+    fs::path objectPath;
+    std::string sourceSectionName;
+    std::uint32_t offset = 0;
+    std::string typeName;
+    std::string targetName;
+    std::uint32_t targetRva = 0;
+    std::int64_t addend = 0;
+    std::int32_t relative = 0;
+    std::uint64_t storedValue = 0;
+    bool hasStoredValue = false;
+};
+
 std::uint32_t alignTo(std::uint32_t value, std::uint32_t alignment) {
     return (value + alignment - 1) / alignment * alignment;
+}
+
+bool isRecognizedSection(const std::string &name) {
+    return name == ".text" || name == ".data" || name == ".rdata" || name == ".bss";
+}
+
+bool isTraceableSymbol(const Symbol &symbol) {
+    return !symbol.name.empty() && symbol.name[0] != '.' && symbol.storageClass == StorageClassExternal;
+}
+
+std::string hex32(std::uint32_t value) {
+    std::ostringstream out;
+    out << "0x" << std::hex << std::uppercase << value;
+    return out.str();
+}
+
+std::string targetDescription(const Symbol &symbol, std::int32_t addend) {
+    if (symbol.sectionNumber == UndefinedSection && symbol.name == "ExitProcess") {
+        return "import ExitProcess";
+    }
+    if (addend == 0) {
+        return symbol.name;
+    }
+    if (addend > 0) {
+        return symbol.name + " + " + std::to_string(addend);
+    }
+    return symbol.name + " - " + std::to_string(-addend);
+}
+
+std::string targetDescription64(const Symbol &symbol, std::int64_t addend) {
+    if (symbol.sectionNumber == UndefinedSection && symbol.name == "ExitProcess") {
+        return "import ExitProcess";
+    }
+    if (addend == 0) {
+        return symbol.name;
+    }
+    if (addend > 0) {
+        return symbol.name + " + " + std::to_string(addend);
+    }
+    return symbol.name + " - " + std::to_string(-addend);
 }
 
 std::uint16_t read16(const std::vector<std::uint8_t> &bytes, std::size_t offset) {
@@ -105,6 +169,25 @@ std::uint32_t read32(const std::vector<std::uint8_t> &bytes, std::size_t offset)
 
 std::int16_t readS16(const std::vector<std::uint8_t> &bytes, std::size_t offset) {
     return static_cast<std::int16_t>(read16(bytes, offset));
+}
+
+std::uint64_t read64(const std::vector<std::uint8_t> &bytes, std::size_t offset) {
+    if (offset + 8 > bytes.size()) {
+        throw std::runtime_error("truncated binary while reading u64");
+    }
+    std::uint64_t value = 0;
+    for (int i = 0; i < 8; ++i) {
+        value |= static_cast<std::uint64_t>(bytes[offset + i]) << (i * 8);
+    }
+    return value;
+}
+
+std::int32_t readS32(const std::vector<std::uint8_t> &bytes, std::size_t offset) {
+    return static_cast<std::int32_t>(read32(bytes, offset));
+}
+
+std::int64_t readS64(const std::vector<std::uint8_t> &bytes, std::size_t offset) {
+    return static_cast<std::int64_t>(read64(bytes, offset));
 }
 
 void write16(std::vector<std::uint8_t> &bytes, std::size_t offset, std::uint16_t value) {
@@ -318,12 +401,41 @@ ImportLayout buildImportLayout(std::uint32_t idataRva) {
     return layout;
 }
 
+std::uint32_t resolveRelocationTargetRva(
+    const LinkedObject &linkedObject,
+    const Symbol &symbol,
+    const std::unordered_map<std::string, std::uint32_t> &sectionRvas,
+    const std::unordered_map<std::string, std::uint32_t> &externalSymbols,
+    std::uint32_t exitProcessThunkRva) {
+    if (symbol.sectionNumber > 0 &&
+        static_cast<std::size_t>(symbol.sectionNumber) <= linkedObject.object.sections.size()) {
+        const Section &section = linkedObject.object.sections[symbol.sectionNumber - 1];
+        const auto sectionRva = sectionRvas.find(section.name);
+        if (sectionRva == sectionRvas.end()) {
+            throw std::runtime_error("unsupported target section in relocation: " + section.name);
+        }
+        return sectionRva->second + linkedObject.sectionOffsets[symbol.sectionNumber - 1] + symbol.value;
+    }
+    if (symbol.sectionNumber == UndefinedSection && symbol.name == "ExitProcess") {
+        return exitProcessThunkRva;
+    }
+    if (symbol.sectionNumber == UndefinedSection) {
+        const auto found = externalSymbols.find(symbol.name);
+        if (found == externalSymbols.end()) {
+            throw std::runtime_error("unresolved external symbol: " + symbol.name);
+        }
+        return found->second;
+    }
+    throw std::runtime_error("unsupported external symbol in relocation: " + symbol.name);
+}
+
 void applyRelocations(
     const LinkedObject &linkedObject,
     const std::unordered_map<std::string, std::uint32_t> &sectionRvas,
     const std::unordered_map<std::string, std::uint32_t> &externalSymbols,
     SectionLayout &textLayout,
-    std::uint32_t exitProcessThunkRva) {
+    std::uint32_t exitProcessThunkRva,
+    std::vector<RelocationTraceEntry> *traceEntries) {
     const ObjectFile &object = linkedObject.object;
     const std::size_t textSectionIndex = findTextSectionIndex(object);
     const Section &textSection = object.sections[textSectionIndex];
@@ -339,38 +451,114 @@ void applyRelocations(
         }
 
         const Symbol &symbol = object.symbols[relocation.symbolIndex];
-        std::uint32_t targetRva = 0;
-        if (symbol.sectionNumber > 0 &&
-            static_cast<std::size_t>(symbol.sectionNumber) <= object.sections.size()) {
-            const Section &section = object.sections[symbol.sectionNumber - 1];
-            const auto sectionRva = sectionRvas.find(section.name);
-            if (sectionRva == sectionRvas.end()) {
-                throw std::runtime_error("unsupported target section in relocation: " + section.name);
-            }
-            targetRva = sectionRva->second + linkedObject.sectionOffsets[symbol.sectionNumber - 1] + symbol.value;
-        } else if (symbol.sectionNumber == UndefinedSection && symbol.name == "ExitProcess") {
-            targetRva = exitProcessThunkRva;
-        } else if (symbol.sectionNumber == UndefinedSection) {
-            const auto found = externalSymbols.find(symbol.name);
-            if (found == externalSymbols.end()) {
-                throw std::runtime_error("unresolved external symbol: " + symbol.name);
-            }
-            targetRva = found->second;
-        } else {
-            throw std::runtime_error("unsupported external symbol in relocation: " + symbol.name);
-        }
+        const std::uint32_t targetRva = resolveRelocationTargetRva(
+            linkedObject,
+            symbol,
+            sectionRvas,
+            externalSymbols,
+            exitProcessThunkRva);
 
         const std::uint32_t relocationRva =
             sectionRvas.at(".text") + linkedObject.sectionOffsets[textSectionIndex] + relocation.offset;
-        const std::int64_t relative = static_cast<std::int64_t>(targetRva) -
+        const std::int32_t addend = readS32(
+            textLayout.bytes,
+            linkedObject.sectionOffsets[textSectionIndex] + relocation.offset);
+        const std::int64_t relative = static_cast<std::int64_t>(targetRva) +
+            static_cast<std::int64_t>(addend) -
             static_cast<std::int64_t>(relocationRva + 4);
         if (relative < INT32_MIN || relative > INT32_MAX) {
             throw std::runtime_error("REL32 relocation out of range");
+        }
+        if (traceEntries) {
+            const std::int64_t effectiveTarget =
+                static_cast<std::int64_t>(targetRva) + static_cast<std::int64_t>(addend);
+            traceEntries->push_back(RelocationTraceEntry{
+                linkedObject.object.path,
+                ".text",
+                relocation.offset,
+                "REL32",
+                targetDescription(symbol, addend),
+                static_cast<std::uint32_t>(effectiveTarget),
+                addend,
+                static_cast<std::int32_t>(relative),
+                0,
+                false});
         }
         write32(
             textLayout.bytes,
             linkedObject.sectionOffsets[textSectionIndex] + relocation.offset,
             static_cast<std::uint32_t>(static_cast<std::int32_t>(relative)));
+    }
+}
+
+void applyInitializedDataRelocations(
+    const LinkedObject &linkedObject,
+    const std::unordered_map<std::string, std::uint32_t> &sectionRvas,
+    const std::unordered_map<std::string, std::uint32_t> &externalSymbols,
+    std::vector<SectionLayout> &layouts,
+    std::uint32_t exitProcessThunkRva,
+    std::vector<RelocationTraceEntry> *traceEntries) {
+    for (std::size_t sectionIndex = 0; sectionIndex < linkedObject.object.sections.size(); ++sectionIndex) {
+        const Section &section = linkedObject.object.sections[sectionIndex];
+        if (section.name == ".text" || section.relocationCount == 0 || section.rawSize == 0) {
+            continue;
+        }
+        auto layoutIt = std::find_if(
+            layouts.begin(),
+            layouts.end(),
+            [&](const SectionLayout &layout) { return layout.name == section.name; });
+        if (layoutIt == layouts.end()) {
+            continue;
+        }
+        if (layoutIt->isUninitializedData) {
+            throw std::runtime_error("unsupported relocation against uninitialized output section: " + section.name);
+        }
+
+        const std::uint32_t mergedSectionOffset = linkedObject.sectionOffsets[sectionIndex];
+        for (const auto &relocation : readRelocations(linkedObject.object, section)) {
+            if (relocation.type != RelAmd64Addr64) {
+                throw std::runtime_error(
+                    "unsupported COFF relocation type in " + section.name + ": " +
+                    std::to_string(relocation.type));
+            }
+            if (relocation.symbolIndex >= linkedObject.object.symbols.size()) {
+                throw std::runtime_error("relocation references invalid symbol index");
+            }
+            if (mergedSectionOffset + relocation.offset + 8 > layoutIt->bytes.size()) {
+                throw std::runtime_error("relocation points outside merged section: " + section.name);
+            }
+
+            const Symbol &symbol = linkedObject.object.symbols[relocation.symbolIndex];
+            const std::uint32_t targetRva = resolveRelocationTargetRva(
+                linkedObject,
+                symbol,
+                sectionRvas,
+                externalSymbols,
+                exitProcessThunkRva);
+            const std::int64_t addend = readS64(layoutIt->bytes, mergedSectionOffset + relocation.offset);
+            const std::uint64_t storedValue = static_cast<std::uint64_t>(
+                static_cast<std::int64_t>(ImageBase) +
+                static_cast<std::int64_t>(targetRva) +
+                addend);
+
+            if (traceEntries) {
+                const std::int64_t effectiveTarget =
+                    static_cast<std::int64_t>(targetRva) + addend;
+                traceEntries->push_back(RelocationTraceEntry{
+                    linkedObject.object.path,
+                    section.name,
+                    relocation.offset,
+                    "ADDR64",
+                    targetDescription64(symbol, addend),
+                    static_cast<std::uint32_t>(effectiveTarget),
+                    addend,
+                    0,
+                    storedValue,
+                    true});
+            }
+
+            write64(layoutIt->bytes, mergedSectionOffset + relocation.offset, storedValue);
+        }
     }
 }
 
@@ -460,7 +648,8 @@ std::vector<SectionLayout> mergeSections(std::vector<LinkedObject> &linkedObject
 
 std::unordered_map<std::string, std::uint32_t> collectExternalSymbols(
     const std::vector<LinkedObject> &linkedObjects,
-    const std::unordered_map<std::string, std::uint32_t> &sectionRvas) {
+    const std::unordered_map<std::string, std::uint32_t> &sectionRvas,
+    std::vector<ResolvedSymbolTraceEntry> *traceEntries) {
     std::unordered_map<std::string, std::uint32_t> symbols;
 
     for (const auto &linkedObject : linkedObjects) {
@@ -486,20 +675,143 @@ std::unordered_map<std::string, std::uint32_t> collectExternalSymbols(
             if (!inserted) {
                 throw std::runtime_error("duplicate external symbol: " + symbol.name);
             }
+            if (traceEntries) {
+                traceEntries->push_back(ResolvedSymbolTraceEntry{
+                    linkedObject.object.path,
+                    section.name,
+                    symbol.name,
+                    rva,
+                    false});
+            }
         }
     }
 
     return symbols;
 }
 
-} // namespace
-
-void PeLinker::linkSingleObject(const fs::path &objPath, const fs::path &exePath) {
-    linkObjects({objPath}, exePath);
+void traceInputObjects(std::ostream &out, const std::vector<LinkedObject> &linkedObjects) {
+    out << "[link] input objects\n";
+    for (const auto &linkedObject : linkedObjects) {
+        out << "[link] object " << linkedObject.object.path.string() << '\n';
+        for (const auto &section : linkedObject.object.sections) {
+            if (!isRecognizedSection(section.name)) {
+                continue;
+            }
+            out << "[link]   section " << section.name
+                << " size=" << std::max(section.virtualSize, section.rawSize)
+                << " raw=" << section.rawSize
+                << " relocations=" << section.relocationCount << '\n';
+        }
+        for (const auto &symbol : linkedObject.object.symbols) {
+            if (!isTraceableSymbol(symbol)) {
+                continue;
+            }
+            if (symbol.sectionNumber == UndefinedSection) {
+                out << "[link]   extern " << symbol.name << '\n';
+                continue;
+            }
+            if (symbol.sectionNumber <= 0 ||
+                static_cast<std::size_t>(symbol.sectionNumber) > linkedObject.object.sections.size()) {
+                continue;
+            }
+            const Section &section = linkedObject.object.sections[symbol.sectionNumber - 1];
+            if (!isRecognizedSection(section.name)) {
+                continue;
+            }
+            out << "[link]   symbol " << symbol.name
+                << " section=" << section.name
+                << " value=" << hex32(symbol.value) << '\n';
+        }
+    }
 }
 
-void PeLinker::linkObjects(const std::vector<fs::path> &objPaths, const fs::path &exePath) {
+void traceMergedSections(
+    std::ostream &out,
+    const std::vector<SectionLayout> &sections,
+    std::uint32_t idataRva,
+    std::uint32_t idataVirtualSize,
+    std::uint32_t idataRawPointer,
+    std::uint32_t idataRawSize) {
+    out << "[link] merged sections\n";
+    for (const auto &section : sections) {
+        out << "[link]   " << section.name
+            << " rva=" << hex32(section.rva)
+            << " vsize=" << section.virtualSize
+            << " raw_size=" << section.rawSize
+            << " raw_ptr=" << hex32(section.rawPointer)
+            << " uninitialized=" << (section.isUninitializedData ? "yes" : "no") << '\n';
+    }
+    out << "[link]   .idata"
+        << " rva=" << hex32(idataRva)
+        << " vsize=" << idataVirtualSize
+        << " raw_size=" << idataRawSize
+        << " raw_ptr=" << hex32(idataRawPointer)
+        << " uninitialized=no\n";
+}
+
+void traceResolvedSymbols(
+    std::ostream &out,
+    std::vector<ResolvedSymbolTraceEntry> entries,
+    const ImportLayout &imports) {
+    entries.push_back(ResolvedSymbolTraceEntry{
+        {},
+        ".idata",
+        "ExitProcess",
+        imports.iatRva,
+        true});
+    std::sort(
+        entries.begin(),
+        entries.end(),
+        [](const ResolvedSymbolTraceEntry &left, const ResolvedSymbolTraceEntry &right) {
+            return left.name < right.name;
+        });
+
+    out << "[link] resolved symbols\n";
+    for (const auto &entry : entries) {
+        out << "[link]   " << entry.name
+            << " -> " << hex32(entry.rva);
+        if (entry.imported) {
+            out << " import_iat";
+        } else {
+            out << " from " << entry.objectPath.string() << ":" << entry.sectionName;
+        }
+        out << '\n';
+    }
+}
+
+void traceRelocations(std::ostream &out, const std::vector<RelocationTraceEntry> &entries) {
+    out << "[link] relocations\n";
+    for (const auto &entry : entries) {
+        out << "[link]   " << entry.objectPath.string()
+            << " section=" << entry.sourceSectionName
+            << " off=" << hex32(entry.offset)
+            << " type=" << entry.typeName
+            << " target=" << entry.targetName
+            << " target_rva=" << hex32(entry.targetRva)
+            << " addend=" << entry.addend;
+        if (entry.hasStoredValue) {
+            out << " stored=0x" << std::hex << std::uppercase << entry.storedValue << std::dec;
+        } else {
+            out << " relative=" << entry.relative;
+        }
+        out << '\n';
+    }
+}
+
+} // namespace
+
+void PeLinker::linkSingleObject(const fs::path &objPath, const fs::path &exePath, std::ostream *trace) {
+    linkObjects({objPath}, exePath, trace);
+}
+
+void PeLinker::linkObjects(
+    const std::vector<fs::path> &objPaths,
+    const fs::path &exePath,
+    std::ostream *trace) {
     std::vector<LinkedObject> linkedObjects = readLinkedObjects(objPaths);
+    if (trace) {
+        traceInputObjects(*trace, linkedObjects);
+    }
     std::vector<SectionLayout> sections = mergeSections(linkedObjects);
     auto textLayout = std::find_if(
         sections.begin(),
@@ -531,16 +843,34 @@ void PeLinker::linkObjects(const std::vector<fs::path> &objPaths, const fs::path
         textLayout->bytes.size() - 4,
         static_cast<std::uint32_t>(static_cast<std::int32_t>(thunkDisplacement)));
 
+    std::vector<ResolvedSymbolTraceEntry> resolvedSymbolTraceEntries;
     const std::unordered_map<std::string, std::uint32_t> externalSymbols =
-        collectExternalSymbols(linkedObjects, sectionRvas);
+        collectExternalSymbols(
+            linkedObjects,
+            sectionRvas,
+            trace ? &resolvedSymbolTraceEntries : nullptr);
 
     const auto entry = externalSymbols.find("mainCRTStartup");
     if (entry == externalSymbols.end()) {
         throw std::runtime_error("missing entry symbol: mainCRTStartup");
     }
     const std::uint32_t entryRva = entry->second;
+    std::vector<RelocationTraceEntry> relocationTraceEntries;
     for (const auto &linkedObject : linkedObjects) {
-        applyRelocations(linkedObject, sectionRvas, externalSymbols, *textLayout, thunkRva);
+        applyRelocations(
+            linkedObject,
+            sectionRvas,
+            externalSymbols,
+            *textLayout,
+            thunkRva,
+            trace ? &relocationTraceEntries : nullptr);
+        applyInitializedDataRelocations(
+            linkedObject,
+            sectionRvas,
+            externalSymbols,
+            sections,
+            thunkRva,
+            trace ? &relocationTraceEntries : nullptr);
     }
 
     const std::uint32_t sectionCount = static_cast<std::uint32_t>(sections.size() + 1);
@@ -561,6 +891,12 @@ void PeLinker::linkObjects(const std::vector<fs::path> &objPaths, const fs::path
     const std::uint32_t idataRawPointer = nextRawPointer;
     const std::uint32_t sizeOfImage = alignTo(idataRva + idataVirtualSize, SectionAlignment);
     const std::uint32_t fileSize = idataRawPointer + idataRawSize;
+
+    if (trace) {
+        traceMergedSections(*trace, sections, idataRva, idataVirtualSize, idataRawPointer, idataRawSize);
+        traceResolvedSymbols(*trace, resolvedSymbolTraceEntries, imports);
+        traceRelocations(*trace, relocationTraceEntries);
+    }
 
     std::vector<std::uint8_t> file(0x80, 0);
     file[0] = 'M';
@@ -612,7 +948,9 @@ void PeLinker::linkObjects(const std::vector<fs::path> &objPaths, const fs::path
     append32(file, headersSize);
     append32(file, 0);
     append16(file, 3);
-    append16(file, 0x8160);
+    // The current teaching linker does not emit a .reloc table yet, so
+    // data-side absolute addresses must keep the preferred image base.
+    append16(file, 0x8100);
     append64(file, 0x100000);
     append64(file, 0x1000);
     append64(file, 0x100000);

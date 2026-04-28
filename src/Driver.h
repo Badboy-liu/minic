@@ -20,6 +20,7 @@ private:
         bool assemblyOnly = false;
         bool compileOnly = false;
         bool keepObject = false;
+        bool linkTrace = false;
     };
 
     Options parseOptions(const std::vector<std::string> &args) const;

@@ -21,7 +21,8 @@ public:
     static void linkObjects(
         TargetKind target,
         const std::vector<std::filesystem::path> &objPaths,
-        const std::filesystem::path &exePath);
+        const std::filesystem::path &exePath,
+        bool traceLinker);
 
 private:
     static std::filesystem::path findExecutableOnPath(const std::string &name);

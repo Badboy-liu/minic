@@ -10,12 +10,31 @@ It implements the pipeline in clear stages:
 - Code generation: emit Windows x64 NASM assembly
 - Linking: invoke `nasm` to produce a COFF `.obj`, then use the built-in PE linker to produce a working `.exe`
 
+## Documentation
+
+Primary docs:
+
+- [Documentation Guide](/E:/project/cpp/minic/docs/README.md)
+- [Project Status Overview](/E:/project/cpp/minic/docs/project-status-overview.md)
+- [PE/COFF Linker Support](/E:/project/cpp/minic/docs/pe-coff-linker-support.md)
+- [minic Relocation Matrix](/E:/project/cpp/minic/docs/minic-relocation-matrix.md)
+
+Document types:
+
+- Long-lived docs describe the project as it works today.
+- Process docs under [docs/superpowers](/E:/project/cpp/minic/docs/superpowers) record design, planning, and progress history for specific workstreams.
+
 ## Supported C subset
 
 The current compiler supports:
 
 - multiple `char` / `short` / `int` / `long` / `long long` / `void` functions
 - function declarations and later definitions
+- global integer variables
+- global `char[]` variables
+- global pointer initializers for `&global_object`
+- global pointer initializers for string literals such as `char *p = "A";`
+- tentative global definitions emitted via `.bss`
 - `void` functions
 - up to 4 `int` parameters per function
 - pointer parameters and locals
@@ -73,13 +92,75 @@ You can also compile multiple files into one executable:
 
 Each input file is compiled into its own NASM assembly file and object file. The built-in PE linker then resolves external function symbols across those objects, so functions defined in one `.c` file can be called from another `.c` file.
 
-## Verify the sample
+Global variables are emitted into `.data` when initialized and `.bss` when they are uninitialized/tentative definitions. The built-in PE linker preserves section-relative offsets for NASM COFF `REL32` relocations, so multiple globals placed in `.bss` keep distinct addresses in the final executable. It also supports the current compiler's minimal `.data` `ADDR64` relocation path for global pointer initializers such as `int *p = &x;` and `char *p = "A";`.
 
-The sample program returns `42` as its process exit code:
+## Quick Check
+
+Fastest way to run the current phase regression suite:
 
 ```powershell
+ctest --preset phase-current
+```
+
+Fastest way to run only the `.bss` teaching case:
+
+```powershell
+ctest --preset bss
+```
+
+## Manual Verification
+
+Sample program:
+
+```powershell
+.\build\Debug\minic.exe .\input\answer.c
 .\build\output\answer.exe
 $LASTEXITCODE
+```
+
+`.bss` integrity sample with link trace:
+
+```powershell
+.\build\Debug\minic.exe .\input\tmp_bss_integrity.c --link-trace --keep-obj
+```
+
+The trace prints:
+
+- input object summaries
+- object-level defined symbols and extern references
+- merged section layout
+- resolved symbols
+- applied `REL32` and minimal `ADDR64` relocations
+
+To verify multi-object PE linking:
+
+```powershell
+.\build\Debug\minic.exe .\input\tmp_multi_main.c .\input\tmp_multi_math.c --link-trace -o .\build\output\tmp_multi_trace.exe
+.\build\output\tmp_multi_trace.exe
+$LASTEXITCODE
+```
+
+## Run Tests
+
+Fastest commands:
+
+```powershell
+ctest --preset phase-current
+ctest --preset bss
+```
+
+Explicit underlying CTest command for the current phase:
+
+```powershell
+ctest --test-dir .\build -C Debug -L phase-current --output-on-failure
+```
+
+Current regression cases are declared in [CMakeLists.txt](/E:/project/cpp/minic/CMakeLists.txt), with per-case source files, compiler arguments, expected exit codes, and trace/output checks passed into [run_regression_case.ps1](/E:/project/cpp/minic/tests/run_regression_case.ps1).
+
+To run a single example by test name:
+
+```powershell
+ctest --test-dir .\build -C Debug -R minic_bss_integrity --output-on-failure
 ```
 
 ## Notes
@@ -87,8 +168,9 @@ $LASTEXITCODE
 This is intentionally a tiny compiler, not a full ISO C implementation.
 Current limits:
 
-- no global variables
-- no string literals
+- no general non-constant global initializers beyond `&global_object` and string-literal pointer forms
+- no general global array initializers beyond `char[] = "..."` string literals
+- no local string literal initialization
 - no structs
 - only up to 4 parameters
 - no array initializers

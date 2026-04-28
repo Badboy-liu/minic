@@ -149,6 +149,21 @@ void CodeGenerator::emitGlobals() {
             continue;
         }
 
+        if (global.type->isPointer() && global.init) {
+            std::ostringstream line;
+            line << global.symbolName << ": dq ";
+            if (global.init->kind == Expr::Kind::String) {
+                const auto &stringExpr = static_cast<const StringExpr &>(*global.init);
+                line << stringLabel(stringExpr.value);
+            } else {
+                const auto &unary = static_cast<const UnaryExpr &>(*global.init);
+                const auto &variable = static_cast<const VariableExpr &>(*unary.operand);
+                line << variable.symbolName;
+            }
+            emitDataLine(line.str());
+            continue;
+        }
+
         const int value = global.init ? static_cast<const NumberExpr &>(*global.init).value : 0;
         std::ostringstream line;
         switch (global.type->valueSize()) {

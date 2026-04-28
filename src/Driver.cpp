@@ -154,7 +154,7 @@ int Driver::run(const std::vector<std::string> &args) {
         return 0;
     }
 
-    Toolchain::linkObjects(options.target, objPaths, options.outputPath);
+    Toolchain::linkObjects(options.target, objPaths, options.outputPath, options.linkTrace);
 
     if (!options.keepObject) {
         for (const auto &objPath : objPaths) {
@@ -189,6 +189,8 @@ Driver::Options Driver::parseOptions(const std::vector<std::string> &args) const
             options.asmPathExplicit = true;
         } else if (args[i] == "--keep-obj") {
             options.keepObject = true;
+        } else if (args[i] == "--link-trace") {
+            options.linkTrace = true;
         } else if (args[i] == "-S") {
             options.assemblyOnly = true;
             options.keepObject = true;
@@ -251,5 +253,5 @@ void Driver::writeFile(const fs::path &path, const std::string &content) {
 }
 
 std::string Driver::usage() {
-    return "Usage: minic <input.c>... [--target x86_64-windows|x86_64-linux] [-S] [-c] [-o output] [--emit-asm output.asm] [--keep-obj]";
+    return "Usage: minic <input.c>... [--target x86_64-windows|x86_64-linux] [-S] [-c] [-o output] [--emit-asm output.asm] [--keep-obj] [--link-trace]";
 }

@@ -162,9 +162,43 @@ void SemanticAnalyzer::analyzeGlobal(GlobalVar &global) {
         return;
     }
 
+    if (global.type->isPointer()) {
+        if (!isSupportedGlobalPointerInitializer(global)) {
+            fail(
+                "global pointer initializers currently support only '&global' or string literals: " +
+                global.name);
+        }
+        return;
+    }
+
     if (global.init->kind != Expr::Kind::Number || !global.type->isInteger()) {
         fail("global initializers currently support only integer constants or char[] string literals: " + global.name);
     }
+}
+
+bool SemanticAnalyzer::isSupportedGlobalPointerInitializer(const GlobalVar &global) const {
+    if (global.init->kind == Expr::Kind::String) {
+        return canAssign(global.type, global.init->type);
+    }
+
+    if (global.init->kind != Expr::Kind::Unary) {
+        return false;
+    }
+
+    const auto &unary = static_cast<const UnaryExpr &>(*global.init);
+    if (unary.op != UnaryOp::AddressOf) {
+        return false;
+    }
+    if (unary.operand->kind != Expr::Kind::Variable) {
+        return false;
+    }
+
+    const auto &variable = static_cast<const VariableExpr &>(*unary.operand);
+    if (!variable.isGlobal || variable.type->isArray()) {
+        return false;
+    }
+
+    return canAssign(global.type, global.init->type);
 }
 
 void SemanticAnalyzer::analyzeBlock(BlockStmt &block) {
