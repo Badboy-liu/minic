@@ -5,6 +5,12 @@
 void SemanticAnalyzer::analyze(Program &program) {
     bool hasMain = false;
     functions.clear();
+    globals.clear();
+    globalSignatures.clear();
+
+    for (auto &global : program.globals) {
+        analyzeGlobal(global);
+    }
 
     for (const auto &function : program.functions) {
         FunctionSignature signature;
@@ -84,6 +90,81 @@ void SemanticAnalyzer::analyzeFunction(Function &function) {
     leaveScope();
 
     function.stackSize = alignTo(nextStackOffset, 16);
+}
+
+void SemanticAnalyzer::analyzeGlobal(GlobalVar &global) {
+    if (global.type->isVoid()) {
+        fail("global variable cannot have type void: " + global.name);
+    }
+    if (global.type->isArray()) {
+        if (global.type->elementType->isVoid() || global.type->arrayLength <= 0) {
+            fail("only positive-length global arrays with non-void elements are supported: " + global.name);
+        }
+    }
+
+    global.symbolName = "gv_" + global.name;
+    global.emitStorage = false;
+    global.isBss = false;
+
+    const bool hasInitializer = global.init != nullptr;
+    const bool isTentativeDefinition = !global.isExternStorage && !hasInitializer;
+
+    auto found = globalSignatures.find(global.name);
+    if (found == globalSignatures.end()) {
+        GlobalSignature signature;
+        signature.type = global.type;
+        signature.hasInitializerDefinition = hasInitializer;
+        signature.hasTentativeDefinition = isTentativeDefinition;
+        signature.symbolName = global.symbolName;
+        globalSignatures.emplace(global.name, std::move(signature));
+
+        if (!global.isExternStorage) {
+            global.emitStorage = true;
+            global.isBss = isTentativeDefinition;
+        }
+    } else {
+        if (!sameType(found->second.type, global.type)) {
+            fail("conflicting global variable type: " + global.name);
+        }
+        global.symbolName = found->second.symbolName;
+
+        if (hasInitializer) {
+            if (found->second.hasInitializerDefinition) {
+                fail("duplicate initialized global definition: " + global.name);
+            }
+            found->second.hasInitializerDefinition = true;
+            found->second.hasTentativeDefinition = false;
+            global.emitStorage = true;
+            global.isBss = false;
+        } else if (isTentativeDefinition && !found->second.hasInitializerDefinition && !found->second.hasTentativeDefinition) {
+            found->second.hasTentativeDefinition = true;
+            global.emitStorage = true;
+            global.isBss = true;
+        }
+    }
+
+    globals[global.name] = VariableSymbol{global.type, 0, true, global.symbolName};
+
+    if (!hasInitializer) {
+        return;
+    }
+
+    analyzeExpr(*global.init);
+    if (global.type->isArray()) {
+        if (global.init->kind != Expr::Kind::String ||
+            !global.type->elementType->equals(*Type::makeChar())) {
+            fail("global array initializers currently support only string literals for char[]: " + global.name);
+        }
+        const auto &stringExpr = static_cast<const StringExpr &>(*global.init);
+        if (static_cast<int>(stringExpr.value.size()) + 1 > global.type->arrayLength) {
+            fail("string literal is too long for global array: " + global.name);
+        }
+        return;
+    }
+
+    if (global.init->kind != Expr::Kind::Number || !global.type->isInteger()) {
+        fail("global initializers currently support only integer constants or char[] string literals: " + global.name);
+    }
 }
 
 void SemanticAnalyzer::analyzeBlock(BlockStmt &block) {
@@ -196,11 +277,19 @@ void SemanticAnalyzer::analyzeExpr(Expr &expr) {
         expr.type = Type::makeInt();
         expr.isLValue = false;
         return;
+    case Expr::Kind::String: {
+        auto &stringExpr = static_cast<StringExpr &>(expr);
+        expr.type = Type::makeArray(Type::makeChar(), static_cast<int>(stringExpr.value.size()) + 1);
+        expr.isLValue = false;
+        return;
+    }
     case Expr::Kind::Variable: {
         auto &variable = static_cast<VariableExpr &>(expr);
         const VariableSymbol symbol = resolveVariable(variable.name);
         variable.stackOffset = symbol.stackOffset;
         variable.type = symbol.type;
+        variable.isGlobal = symbol.isGlobal;
+        variable.symbolName = symbol.symbolName;
         variable.isLValue = true;
         expr.type = symbol.type;
         expr.isLValue = true;
@@ -387,8 +476,8 @@ void SemanticAnalyzer::declareVariable(DeclStmt &decl) {
         fail("variable cannot have type void: " + decl.name);
     }
     if (decl.type->isArray()) {
-        if (!decl.type->elementType->isInteger() || decl.type->arrayLength <= 0) {
-            fail("only positive-length local int arrays are supported: " + decl.name);
+        if (decl.type->elementType->isVoid() || decl.type->arrayLength <= 0) {
+            fail("only positive-length local arrays with non-void elements are supported: " + decl.name);
         }
     }
 
@@ -405,11 +494,20 @@ VariableSymbol SemanticAnalyzer::resolveVariable(const std::string &name) const 
         }
     }
 
+    const auto global = globals.find(name);
+    if (global != globals.end()) {
+        return global->second;
+    }
+
     fail("use of undeclared variable: " + name);
 }
 
 bool SemanticAnalyzer::canAssign(const TypePtr &target, const TypePtr &value) const {
-    return sameType(target, decayType(value));
+    TypePtr decayedValue = decayType(value);
+    if (target->isInteger() && decayedValue->isInteger()) {
+        return true;
+    }
+    return sameType(target, decayedValue);
 }
 
 bool SemanticAnalyzer::sameType(const TypePtr &left, const TypePtr &right) const {
@@ -417,7 +515,11 @@ bool SemanticAnalyzer::sameType(const TypePtr &left, const TypePtr &right) const
 }
 
 bool SemanticAnalyzer::isEquivalentArgumentType(const TypePtr &param, const TypePtr &arg) const {
-    return sameType(param, decayType(arg));
+    TypePtr decayedArg = decayType(arg);
+    if (param->isInteger() && decayedArg->isInteger()) {
+        return true;
+    }
+    return sameType(param, decayedArg);
 }
 
 TypePtr SemanticAnalyzer::decayType(const TypePtr &type) const {
@@ -426,8 +528,16 @@ TypePtr SemanticAnalyzer::decayType(const TypePtr &type) const {
 
 std::string SemanticAnalyzer::typeName(const TypePtr &type) const {
     switch (type->kind) {
+    case TypeKind::Char:
+        return "char";
+    case TypeKind::Short:
+        return "short";
     case TypeKind::Int:
         return "int";
+    case TypeKind::Long:
+        return "long";
+    case TypeKind::LongLong:
+        return "long long";
     case TypeKind::Void:
         return "void";
     case TypeKind::Pointer:

@@ -94,6 +94,9 @@ std::vector<Token> Lexer::tokenize() {
                 isGreaterEqual ? ">=" : ">"));
             break;
         }
+        case '"':
+            tokens.push_back(lexStringLiteral());
+            break;
         default:
             if (std::isdigit(static_cast<unsigned char>(ch))) {
                 --current;
@@ -165,7 +168,7 @@ void Lexer::skipWhitespaceAndComments() {
 }
 
 Token Lexer::makeToken(TokenKind kind, std::string lexeme, int value) const {
-    return Token{kind, std::move(lexeme), value, tokenLine, tokenColumn};
+    return Token{kind, std::move(lexeme), value, "", tokenLine, tokenColumn};
 }
 
 Token Lexer::lexNumber() {
@@ -178,6 +181,56 @@ Token Lexer::lexNumber() {
 
     const std::string lexeme = source.substr(start, current - start);
     return makeToken(TokenKind::Number, lexeme, std::stoi(lexeme));
+}
+
+Token Lexer::lexStringLiteral() {
+    tokenLine = line;
+    tokenColumn = column - 1;
+    std::string value;
+
+    while (!isAtEnd()) {
+        const char ch = advance();
+        if (ch == '"') {
+            Token token = makeToken(TokenKind::StringLiteral, value);
+            token.stringValue = value;
+            return token;
+        }
+        if (ch == '\\') {
+            if (isAtEnd()) {
+                fail("unterminated escape sequence in string literal");
+            }
+            const char escaped = advance();
+            switch (escaped) {
+            case 'n':
+                value.push_back('\n');
+                break;
+            case 'r':
+                value.push_back('\r');
+                break;
+            case 't':
+                value.push_back('\t');
+                break;
+            case '\\':
+                value.push_back('\\');
+                break;
+            case '"':
+                value.push_back('"');
+                break;
+            case '0':
+                value.push_back('\0');
+                break;
+            default:
+                fail(std::string("unsupported escape sequence '\\") + escaped + "'");
+            }
+            continue;
+        }
+        if (ch == '\n') {
+            fail("unterminated string literal");
+        }
+        value.push_back(ch);
+    }
+
+    fail("unterminated string literal");
 }
 
 Token Lexer::lexIdentifierOrKeyword() {
@@ -193,11 +246,23 @@ Token Lexer::lexIdentifierOrKeyword() {
     }
 
     const std::string lexeme = source.substr(start, current - start);
+    if (lexeme == "char") {
+        return makeToken(TokenKind::KeywordChar, lexeme);
+    }
+    if (lexeme == "short") {
+        return makeToken(TokenKind::KeywordShort, lexeme);
+    }
     if (lexeme == "int") {
         return makeToken(TokenKind::KeywordInt, lexeme);
     }
+    if (lexeme == "long") {
+        return makeToken(TokenKind::KeywordLong, lexeme);
+    }
     if (lexeme == "void") {
         return makeToken(TokenKind::KeywordVoid, lexeme);
+    }
+    if (lexeme == "extern") {
+        return makeToken(TokenKind::KeywordExtern, lexeme);
     }
     if (lexeme == "return") {
         return makeToken(TokenKind::KeywordReturn, lexeme);

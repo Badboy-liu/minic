@@ -8,10 +8,20 @@ const char *tokenKindName(TokenKind kind) {
         return "identifier";
     case TokenKind::Number:
         return "number";
+    case TokenKind::StringLiteral:
+        return "string literal";
+    case TokenKind::KeywordChar:
+        return "char";
+    case TokenKind::KeywordShort:
+        return "short";
     case TokenKind::KeywordInt:
         return "int";
+    case TokenKind::KeywordLong:
+        return "long";
     case TokenKind::KeywordVoid:
         return "void";
+    case TokenKind::KeywordExtern:
+        return "extern";
     case TokenKind::KeywordReturn:
         return "return";
     case TokenKind::KeywordIf:

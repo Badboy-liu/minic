@@ -5,7 +5,11 @@
 #include <vector>
 
 enum class TypeKind {
+    Char,
+    Short,
     Int,
+    Long,
+    LongLong,
     Void,
     Pointer,
     Array
@@ -21,6 +25,22 @@ struct Type {
 
     static TypePtr makeInt() {
         return std::make_shared<Type>(Type{TypeKind::Int, nullptr, 0});
+    }
+
+    static TypePtr makeChar() {
+        return std::make_shared<Type>(Type{TypeKind::Char, nullptr, 0});
+    }
+
+    static TypePtr makeShort() {
+        return std::make_shared<Type>(Type{TypeKind::Short, nullptr, 0});
+    }
+
+    static TypePtr makeLong() {
+        return std::make_shared<Type>(Type{TypeKind::Long, nullptr, 0});
+    }
+
+    static TypePtr makeLongLong() {
+        return std::make_shared<Type>(Type{TypeKind::LongLong, nullptr, 0});
     }
 
     static TypePtr makeVoid() {
@@ -49,7 +69,11 @@ struct Type {
     }
 
     bool isInteger() const {
-        return kind == TypeKind::Int;
+        return kind == TypeKind::Char ||
+            kind == TypeKind::Short ||
+            kind == TypeKind::Int ||
+            kind == TypeKind::Long ||
+            kind == TypeKind::LongLong;
     }
 
     bool isVoid() const {
@@ -70,8 +94,15 @@ struct Type {
 
     int valueSize() const {
         switch (kind) {
+        case TypeKind::Char:
+            return 1;
+        case TypeKind::Short:
+            return 2;
         case TypeKind::Int:
+        case TypeKind::Long:
             return 4;
+        case TypeKind::LongLong:
+            return 8;
         case TypeKind::Void:
             return 0;
         case TypeKind::Pointer:
@@ -123,6 +154,7 @@ enum class BinaryOp {
 struct Expr {
     enum class Kind {
         Number,
+        String,
         Variable,
         Unary,
         Binary,
@@ -144,12 +176,22 @@ struct NumberExpr : Expr {
     int value;
 };
 
+struct StringExpr : Expr {
+    explicit StringExpr(std::string valueValue)
+        : Expr(Kind::String), value(std::move(valueValue)) {}
+
+    std::string value;
+    std::string label;
+};
+
 struct VariableExpr : Expr {
     explicit VariableExpr(std::string nameValue)
         : Expr(Kind::Variable), name(std::move(nameValue)), stackOffset(0) {}
 
     std::string name;
     int stackOffset;
+    bool isGlobal = false;
+    std::string symbolName;
 };
 
 struct UnaryExpr : Expr {
@@ -309,6 +351,18 @@ struct Function {
     }
 };
 
+struct GlobalVar {
+    TypePtr type;
+    std::string name;
+    std::unique_ptr<Expr> init;
+    bool isExternStorage = false;
+    bool isExternal = false;
+    bool emitStorage = true;
+    bool isBss = false;
+    std::string symbolName;
+};
+
 struct Program {
     std::vector<Function> functions;
+    std::vector<GlobalVar> globals;
 };

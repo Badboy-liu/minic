@@ -4,15 +4,21 @@
 #include <string>
 #include <vector>
 
+#include "Target.h"
+
 class Driver {
 public:
     int run(const std::vector<std::string> &args);
 
 private:
     struct Options {
-        std::filesystem::path inputPath;
+        std::vector<std::filesystem::path> inputPaths;
         std::filesystem::path outputPath;
         std::filesystem::path asmPath;
+        TargetKind target = TargetKind::WindowsX64;
+        bool asmPathExplicit = false;
+        bool assemblyOnly = false;
+        bool compileOnly = false;
         bool keepObject = false;
     };
 

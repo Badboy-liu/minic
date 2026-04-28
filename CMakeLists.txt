@@ -12,6 +12,8 @@ add_executable(${PROJECT_NAME}
     src/Driver.h
     src/Toolchain.cpp
     src/Toolchain.h
+    src/PeLinker.cpp
+    src/PeLinker.h
     src/CodeGenerator.cpp
     src/CodeGenerator.h
     src/Semantics.cpp
@@ -22,6 +24,7 @@ add_executable(${PROJECT_NAME}
     src/Lexer.h
     src/Token.cpp
     src/Token.h
+    src/Target.h
     src/Ast.h
 )
 

@@ -1,19 +1,31 @@
 #include "CodeGenerator.h"
 
+#include <iomanip>
+#include <sstream>
+#include <unordered_set>
 #include <stdexcept>
 
+CodeGenerator::CodeGenerator(TargetKind targetValue)
+    : target(targetValue) {}
+
 std::string CodeGenerator::generate(const Program &program) {
+    return generate(program, true);
+}
+
+std::string CodeGenerator::generate(const Program &program, bool emitEntryPointValue) {
     out.str("");
     out.clear();
+    dataLines.clear();
+    bssLines.clear();
+    rdataLines.clear();
+    stringLabels.clear();
     labelCounter = 0;
     loopContinueLabels.clear();
     loopBreakLabels.clear();
+    emitProgramEntryPoint = emitEntryPointValue;
+    currentProgram = &program;
 
-    emitLine("option casemap:none");
-    emitLine("EXTERN ExitProcess:PROC");
-    emitLine("");
-    emitLine(".code");
-    emitLine("");
+    emitPrologue();
 
     for (const auto &function : program.functions) {
         if (!function.isDeclaration()) {
@@ -22,23 +34,197 @@ std::string CodeGenerator::generate(const Program &program) {
         }
     }
 
-    emitLine("mainCRTStartup PROC");
-    emitLine("    sub rsp, 40");
-    emitLine("    call " + functionSymbol("main"));
-    emitLine("    mov ecx, eax");
-    emitLine("    call ExitProcess");
-    emitLine("mainCRTStartup ENDP");
-    emitLine("");
-    emitLine("END");
+    if (emitProgramEntryPoint) {
+        emitEntryPoint();
+    }
+
+    emitGlobals();
+    emitStringLiterals();
 
     return out.str();
+}
+
+void CodeGenerator::emitPrologue() {
+    emitLine("default rel");
+    std::unordered_set<std::string> definedFunctions;
+    for (const auto &function : currentProgram->functions) {
+        if (!function.isDeclaration()) {
+            definedFunctions.insert(function.name);
+        }
+    }
+
+    if (target == TargetKind::WindowsX64) {
+        emitLine("extern ExitProcess");
+        if (emitProgramEntryPoint) {
+            emitLine("global mainCRTStartup");
+        }
+    } else {
+        if (emitProgramEntryPoint) {
+            emitLine("global _start");
+        }
+    }
+    for (const auto &function : currentProgram->functions) {
+        if (function.isDeclaration()) {
+            if (definedFunctions.find(function.name) == definedFunctions.end()) {
+                emitLine("extern " + functionSymbol(function.name));
+            }
+        } else {
+            emitLine("global " + functionSymbol(function.name));
+        }
+    }
+    for (const auto &global : currentProgram->globals) {
+        if (global.isExternal) {
+            emitLine("extern " + global.symbolName);
+        } else {
+            emitLine("global " + global.symbolName);
+        }
+    }
+    emitLine("");
+    emitLine("section .text");
+    emitLine("");
+}
+
+void CodeGenerator::emitGlobals() {
+    if (currentProgram->globals.empty()) {
+        return;
+    }
+
+    for (const auto &global : currentProgram->globals) {
+        if (global.isExternal || !global.emitStorage) {
+            continue;
+        }
+
+        if (global.isBss) {
+            std::ostringstream line;
+            if (global.type->isArray()) {
+                line << global.symbolName << ": resb " << global.type->valueSize();
+            } else {
+                switch (global.type->valueSize()) {
+                case 1:
+                    line << global.symbolName << ": resb 1";
+                    break;
+                case 2:
+                    line << global.symbolName << ": resw 1";
+                    break;
+                case 4:
+                    line << global.symbolName << ": resd 1";
+                    break;
+                default:
+                    line << global.symbolName << ": resq 1";
+                    break;
+                }
+            }
+            emitBssLine(line.str());
+            continue;
+        }
+
+        if (global.type->isArray()) {
+            const auto *stringExpr = global.init ? dynamic_cast<const StringExpr *>(global.init.get()) : nullptr;
+            std::ostringstream line;
+            line << global.symbolName << ": db ";
+            if (stringExpr) {
+                for (std::size_t i = 0; i < stringExpr->value.size(); ++i) {
+                    if (i > 0) {
+                        line << ", ";
+                    }
+                    line << static_cast<int>(static_cast<unsigned char>(stringExpr->value[i]));
+                }
+                if (!stringExpr->value.empty()) {
+                    line << ", ";
+                }
+                line << "0";
+                const int padding = global.type->arrayLength - static_cast<int>(stringExpr->value.size()) - 1;
+                for (int i = 0; i < padding; ++i) {
+                    line << ", 0";
+                }
+            } else {
+                for (int i = 0; i < global.type->arrayLength; ++i) {
+                    if (i > 0) {
+                        line << ", ";
+                    }
+                    line << "0";
+                }
+            }
+            emitDataLine(line.str());
+            continue;
+        }
+
+        const int value = global.init ? static_cast<const NumberExpr &>(*global.init).value : 0;
+        std::ostringstream line;
+        switch (global.type->valueSize()) {
+        case 1:
+            line << global.symbolName << ": db " << value;
+            break;
+        case 2:
+            line << global.symbolName << ": dw " << value;
+            break;
+        case 4:
+            line << global.symbolName << ": dd " << value;
+            break;
+        default:
+            line << global.symbolName << ": dq " << value;
+            break;
+        }
+        emitDataLine(line.str());
+    }
+
+    if (dataLines.empty()) {
+        if (bssLines.empty()) {
+            return;
+        }
+    }
+
+    if (!dataLines.empty()) {
+        emitLine("");
+        emitLine("section .data");
+        for (const auto &line : dataLines) {
+            emitLine(line);
+        }
+    }
+
+    if (!bssLines.empty()) {
+        emitLine("");
+        emitLine("section .bss");
+        for (const auto &line : bssLines) {
+            emitLine(line);
+        }
+    }
+}
+
+void CodeGenerator::emitStringLiterals() {
+    if (rdataLines.empty()) {
+        return;
+    }
+
+    emitLine("");
+    emitLine("section .rdata");
+    for (const auto &line : rdataLines) {
+        emitLine(line);
+    }
+}
+
+void CodeGenerator::emitEntryPoint() {
+    if (target == TargetKind::WindowsX64) {
+        emitLine("mainCRTStartup:");
+        emitLine("    sub rsp, 40");
+        emitLine("    call " + functionSymbol("main"));
+        emitLine("    mov ecx, eax");
+        emitLine("    call ExitProcess");
+        return;
+    }
+
+    emitLine("_start:");
+    emitLine("    call " + functionSymbol("main"));
+    emitLine("    mov edi, eax");
+    emitLine("    mov eax, 60");
+    emitLine("    syscall");
 }
 
 void CodeGenerator::emitFunction(const Function &function) {
     currentReturnLabel = makeLabel(function.name + "_return");
     const std::string symbol = functionSymbol(function.name);
 
-    emitLine(symbol + " PROC");
+    emitLine(symbol + ":");
     emitLine("    push rbp");
     emitLine("    mov rbp, rsp");
     if (function.stackSize > 0) {
@@ -46,14 +232,22 @@ void CodeGenerator::emitFunction(const Function &function) {
     }
     for (int i = 0; i < static_cast<int>(function.parameters.size()); ++i) {
         const Type &type = *function.parameters[i].type;
-        if (type.valueSize() <= 4) {
+        if (type.valueSize() == 1) {
             emitLine(
-                "    mov DWORD PTR [rbp-" + std::to_string(function.parameters[i].stackOffset) + "], " +
-                argumentRegister32(i));
+                "    mov byte [rbp-" + std::to_string(function.parameters[i].stackOffset) + "], " +
+                argumentRegister(i).r8);
+        } else if (type.valueSize() == 2) {
+            emitLine(
+                "    mov word [rbp-" + std::to_string(function.parameters[i].stackOffset) + "], " +
+                argumentRegister(i).r16);
+        } else if (type.valueSize() <= 4) {
+            emitLine(
+                "    mov dword [rbp-" + std::to_string(function.parameters[i].stackOffset) + "], " +
+                argumentRegister(i).r32);
         } else {
             emitLine(
-                "    mov QWORD PTR [rbp-" + std::to_string(function.parameters[i].stackOffset) + "], " +
-                argumentRegister64(i));
+                "    mov qword [rbp-" + std::to_string(function.parameters[i].stackOffset) + "], " +
+                argumentRegister(i).r64);
         }
     }
 
@@ -68,7 +262,6 @@ void CodeGenerator::emitFunction(const Function &function) {
     }
     emitLine("    pop rbp");
     emitLine("    ret");
-    emitLine(symbol + " ENDP");
 }
 
 void CodeGenerator::emitStatement(const Stmt &stmt) {
@@ -179,6 +372,11 @@ void CodeGenerator::emitExpr(const Expr &expr) {
     case Expr::Kind::Number:
         emitLine("    mov eax, " + std::to_string(static_cast<const NumberExpr &>(expr).value));
         return;
+    case Expr::Kind::String: {
+        const auto &stringExpr = static_cast<const StringExpr &>(expr);
+        emitLine("    lea rax, [rel " + stringLabel(stringExpr.value) + "]");
+        return;
+    }
     case Expr::Kind::Variable:
         emitAddress(expr);
         if (expr.type->isArray()) {
@@ -230,14 +428,18 @@ void CodeGenerator::emitExpr(const Expr &expr) {
         for (int i = static_cast<int>(call.arguments.size()) - 1; i >= 0; --i) {
             emitLine("    pop rax");
             if (call.parameterTypes[i]->valueSize() <= 4) {
-                emitLine("    mov " + argumentRegister32(i) + ", eax");
+                emitLine(std::string("    mov ") + argumentRegister(i).r32 + ", eax");
             } else {
-                emitLine("    mov " + argumentRegister64(i) + ", rax");
+                emitLine(std::string("    mov ") + argumentRegister(i).r64 + ", rax");
             }
         }
-        emitLine("    sub rsp, 32");
+        if (target == TargetKind::WindowsX64) {
+            emitLine("    sub rsp, 32");
+        }
         emitLine("    call " + functionSymbol(call.callee));
-        emitLine("    add rsp, 32");
+        if (target == TargetKind::WindowsX64) {
+            emitLine("    add rsp, 32");
+        }
         return;
     }
     case Expr::Kind::Index:
@@ -360,6 +562,10 @@ void CodeGenerator::emitAddress(const Expr &expr) {
     switch (expr.kind) {
     case Expr::Kind::Variable: {
         const auto &variable = static_cast<const VariableExpr &>(expr);
+        if (variable.isGlobal) {
+            emitLine("    lea rax, [rel " + variable.symbolName + "]");
+            return;
+        }
         emitLine("    lea rax, [rbp-" + std::to_string(variable.stackOffset) + "]");
         return;
     }
@@ -388,18 +594,26 @@ void CodeGenerator::emitAddress(const Expr &expr) {
 }
 
 void CodeGenerator::emitLoad(const Type &type) {
-    if (type.valueSize() <= 4) {
-        emitLine("    mov eax, DWORD PTR [rax]");
+    if (type.valueSize() == 1) {
+        emitLine("    movsx eax, byte [rax]");
+    } else if (type.valueSize() == 2) {
+        emitLine("    movsx eax, word [rax]");
+    } else if (type.valueSize() <= 4) {
+        emitLine("    mov eax, dword [rax]");
     } else {
-        emitLine("    mov rax, QWORD PTR [rax]");
+        emitLine("    mov rax, qword [rax]");
     }
 }
 
 void CodeGenerator::emitStore(const Type &type) {
-    if (type.valueSize() <= 4) {
-        emitLine("    mov DWORD PTR [rcx], eax");
+    if (type.valueSize() == 1) {
+        emitLine("    mov byte [rcx], al");
+    } else if (type.valueSize() == 2) {
+        emitLine("    mov word [rcx], ax");
+    } else if (type.valueSize() <= 4) {
+        emitLine("    mov dword [rcx], eax");
     } else {
-        emitLine("    mov QWORD PTR [rcx], rax");
+        emitLine("    mov qword [rcx], rax");
     }
 }
 
@@ -410,42 +624,73 @@ int CodeGenerator::pointeeSize(const Type &type) const {
     return type.elementType->valueSize();
 }
 
-std::string CodeGenerator::argumentRegister32(int index) {
-    switch (index) {
-    case 0:
-        return "ecx";
-    case 1:
-        return "edx";
-    case 2:
-        return "r8d";
-    case 3:
-        return "r9d";
-    default:
-        throw std::runtime_error("internal code generation error: unsupported argument register");
-    }
-}
+const CodeGenerator::RegisterSet &CodeGenerator::argumentRegister(int index) const {
+    static const RegisterSet windows[] = {
+        {"cl", "cx", "ecx", "rcx"},
+        {"dl", "dx", "edx", "rdx"},
+        {"r8b", "r8w", "r8d", "r8"},
+        {"r9b", "r9w", "r9d", "r9"}
+    };
+    static const RegisterSet linux[] = {
+        {"dil", "di", "edi", "rdi"},
+        {"sil", "si", "esi", "rsi"},
+        {"dl", "dx", "edx", "rdx"},
+        {"cl", "cx", "ecx", "rcx"}
+    };
 
-std::string CodeGenerator::argumentRegister64(int index) {
-    switch (index) {
-    case 0:
-        return "rcx";
-    case 1:
-        return "rdx";
-    case 2:
-        return "r8";
-    case 3:
-        return "r9";
-    default:
+    if (index < 0 || index >= 4) {
         throw std::runtime_error("internal code generation error: unsupported argument register");
     }
+    return target == TargetKind::WindowsX64 ? windows[index] : linux[index];
 }
 
 std::string CodeGenerator::functionSymbol(const std::string &name) {
     return "fn_" + name;
 }
 
+std::string CodeGenerator::stringLabel(const std::string &value) {
+    const auto found = stringLabels.find(value);
+    if (found != stringLabels.end()) {
+        return found->second;
+    }
+
+    const std::string label = "str_" + std::to_string(stringLabels.size());
+    stringLabels.emplace(value, label);
+
+    std::ostringstream line;
+    line << label << ": db ";
+    for (std::size_t i = 0; i < value.size(); ++i) {
+        if (i > 0) {
+            line << ", ";
+        }
+        line << static_cast<int>(static_cast<unsigned char>(value[i]));
+    }
+    if (!value.empty()) {
+        line << ", ";
+    }
+    line << "0";
+    emitRdataLine(line.str());
+    return label;
+}
+
+std::string CodeGenerator::globalSymbol(const std::string &name) {
+    return "gv_" + name;
+}
+
 void CodeGenerator::emitLine(const std::string &text) {
     out << text << '\n';
+}
+
+void CodeGenerator::emitDataLine(std::string text) {
+    dataLines.push_back(std::move(text));
+}
+
+void CodeGenerator::emitBssLine(std::string text) {
+    bssLines.push_back(std::move(text));
+}
+
+void CodeGenerator::emitRdataLine(std::string text) {
+    rdataLines.push_back(std::move(text));
 }
 
 std::string CodeGenerator::makeLabel(const std::string &prefix) {

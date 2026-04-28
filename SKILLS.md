@@ -11,6 +11,11 @@ The purpose of this skill is to keep all compiled results inside the `build/` di
 - Put CMake build files in `build/`.
 - Put the `minic` compiler executable under `build/Debug/` when using the Debug preset.
 - Put generated sample executables and assembly files under `build/output/`.
+- Generate NASM assembly and Windows x64 object files through `nasm`.
+- Link executables with the built-in minimal PE linker, not MSVC `link.exe`.
+- For multiple C inputs, compile each file to its own object and let the built-in linker resolve cross-file function calls.
+- Use `--target x86_64-windows` for Windows PE executables.
+- Use `--target x86_64-linux -S` for Linux NASM assembly or `--target x86_64-linux -c` for Linux ELF64 objects.
 - Do not write generated executables or assembly files into the repository root.
 - Do not write generated executables or assembly files into `src/` or `input/`.
 - Prefer `build/output/` instead of the old `output/` directory for new generated files.

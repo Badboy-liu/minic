@@ -9,17 +9,27 @@ Program Parser::parseProgram() {
     Program program;
 
     while (!check(TokenKind::EndOfFile)) {
-        program.functions.push_back(parseFunction());
+        parseExternalDeclaration(program);
     }
 
     return program;
 }
 
-Function Parser::parseFunction() {
+void Parser::parseExternalDeclaration(Program &program) {
+    const bool isExternStorage = match(TokenKind::KeywordExtern);
+    TypePtr baseType = parseType();
+    const Token &nameToken = consume(TokenKind::Identifier, "expected identifier");
+    if (check(TokenKind::LeftParen)) {
+        program.functions.push_back(parseFunction(std::move(baseType), nameToken.lexeme));
+        return;
+    }
+    program.globals.push_back(parseGlobalVariable(std::move(baseType), nameToken.lexeme, isExternStorage));
+}
+
+Function Parser::parseFunction(TypePtr returnType, std::string name) {
     Function function;
-    function.returnType = parseType();
-    const Token &nameToken = consume(TokenKind::Identifier, "expected function name");
-    function.name = nameToken.lexeme;
+    function.returnType = std::move(returnType);
+    function.name = std::move(name);
     consume(TokenKind::LeftParen, "expected '(' after function name");
 
     if (!check(TokenKind::RightParen)) {
@@ -55,6 +65,19 @@ Function Parser::parseFunction() {
     return function;
 }
 
+GlobalVar Parser::parseGlobalVariable(TypePtr declaredType, std::string name, bool isExternStorage) {
+    GlobalVar global;
+    global.type = parseTypeSuffix(std::move(declaredType));
+    global.name = std::move(name);
+    global.isExternStorage = isExternStorage;
+
+    if (match(TokenKind::Equal)) {
+        global.init = parseExpression();
+    }
+    consume(TokenKind::Semicolon, "expected ';' after global declaration");
+    return global;
+}
+
 TypePtr Parser::parseType() {
     TypePtr type = parseBaseType();
     while (match(TokenKind::Star)) {
@@ -63,7 +86,28 @@ TypePtr Parser::parseType() {
     return type;
 }
 
+TypePtr Parser::parseTypeSuffix(TypePtr baseType) {
+    if (match(TokenKind::LeftBracket)) {
+        const Token &lengthToken = consume(TokenKind::Number, "expected array length");
+        consume(TokenKind::RightBracket, "expected ']' after array length");
+        return Type::makeArray(std::move(baseType), lengthToken.intValue);
+    }
+    return baseType;
+}
+
 TypePtr Parser::parseBaseType() {
+    if (match(TokenKind::KeywordChar)) {
+        return Type::makeChar();
+    }
+    if (match(TokenKind::KeywordShort)) {
+        return Type::makeShort();
+    }
+    if (match(TokenKind::KeywordLong)) {
+        if (match(TokenKind::KeywordLong)) {
+            return Type::makeLongLong();
+        }
+        return Type::makeLong();
+    }
     if (match(TokenKind::KeywordInt)) {
         return Type::makeInt();
     }
@@ -157,12 +201,7 @@ std::unique_ptr<Stmt> Parser::parseReturnStatement() {
 
 std::unique_ptr<Stmt> Parser::parseDeclaration(TypePtr declaredType) {
     const Token &nameToken = consume(TokenKind::Identifier, "expected variable name");
-    TypePtr type = declaredType;
-    if (match(TokenKind::LeftBracket)) {
-        const Token &lengthToken = consume(TokenKind::Number, "expected array length");
-        consume(TokenKind::RightBracket, "expected ']' after array length");
-        type = Type::makeArray(type, lengthToken.intValue);
-    }
+    TypePtr type = parseTypeSuffix(std::move(declaredType));
 
     std::unique_ptr<Expr> initializer;
     if (match(TokenKind::Equal)) {
@@ -369,6 +408,9 @@ std::unique_ptr<Expr> Parser::parsePrimary() {
     if (match(TokenKind::Number)) {
         return std::make_unique<NumberExpr>(previous().intValue);
     }
+    if (match(TokenKind::StringLiteral)) {
+        return std::make_unique<StringExpr>(previous().stringValue);
+    }
     if (match(TokenKind::Identifier)) {
         return std::make_unique<VariableExpr>(previous().lexeme);
     }
@@ -382,7 +424,11 @@ std::unique_ptr<Expr> Parser::parsePrimary() {
 }
 
 bool Parser::isTypeSpecifier(TokenKind kind) const {
-    return kind == TokenKind::KeywordInt || kind == TokenKind::KeywordVoid;
+    return kind == TokenKind::KeywordChar ||
+        kind == TokenKind::KeywordShort ||
+        kind == TokenKind::KeywordInt ||
+        kind == TokenKind::KeywordLong ||
+        kind == TokenKind::KeywordVoid;
 }
 
 bool Parser::match(TokenKind kind) {

@@ -9,6 +9,8 @@
 struct VariableSymbol {
     TypePtr type;
     int stackOffset = 0;
+    bool isGlobal = false;
+    std::string symbolName;
 };
 
 struct FunctionSignature {
@@ -17,12 +19,20 @@ struct FunctionSignature {
     bool hasDefinition = false;
 };
 
+struct GlobalSignature {
+    TypePtr type;
+    bool hasInitializerDefinition = false;
+    bool hasTentativeDefinition = false;
+    std::string symbolName;
+};
+
 class SemanticAnalyzer {
 public:
     void analyze(Program &program);
 
 private:
     void analyzeFunction(Function &function);
+    void analyzeGlobal(GlobalVar &global);
     void analyzeBlock(BlockStmt &block);
     void analyzeStatement(Stmt &stmt);
     void analyzeExpr(Expr &expr);
@@ -40,6 +50,8 @@ private:
 
     std::vector<std::unordered_map<std::string, VariableSymbol>> scopes;
     std::unordered_map<std::string, FunctionSignature> functions;
+    std::unordered_map<std::string, VariableSymbol> globals;
+    std::unordered_map<std::string, GlobalSignature> globalSignatures;
     int nextStackOffset = 0;
     int loopDepth = 0;
     TypePtr currentReturnType;

@@ -21,6 +21,7 @@ private:
     void skipWhitespaceAndComments();
     Token makeToken(TokenKind kind, std::string lexeme, int value = 0) const;
     Token lexNumber();
+    Token lexStringLiteral();
     Token lexIdentifierOrKeyword();
     [[noreturn]] void fail(const std::string &message) const;
 
