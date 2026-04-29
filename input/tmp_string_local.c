@@ -1,8 +1,4 @@
-int first_byte(char* p) {
-    return p[0];
-}
-
 int main() {
-    char* p = "A";
-    return first_byte(p);
+    char text[2] = "A";
+    return text[0] + text[1];
 }

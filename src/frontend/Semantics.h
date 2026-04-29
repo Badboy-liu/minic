@@ -33,8 +33,12 @@ public:
 private:
     void analyzeFunction(Function &function);
     void analyzeGlobal(GlobalVar &global);
+    void validateArrayInitializer(const std::string &name, const TypePtr &arrayType, Expr &init, bool isGlobal);
     bool isSupportedGlobalPointerInitializer(const GlobalVar &global) const;
     bool isSupportedGlobalPointerArrayInitializer(const GlobalVar &global) const;
+    bool isSupportedStaticPointerInitializer(const Expr &expr) const;
+    bool isSupportedPointerArrayElementInitializer(const TypePtr &elementType, const Expr &expr, bool isGlobal) const;
+    bool isSupportedGlobalIntegerInitializer(const Expr &expr) const;
     void analyzeBlock(BlockStmt &block);
     void analyzeStatement(Stmt &stmt);
     void analyzeExpr(Expr &expr);
@@ -46,6 +50,9 @@ private:
     bool sameType(const TypePtr &left, const TypePtr &right) const;
     bool isEquivalentArgumentType(const TypePtr &param, const TypePtr &arg) const;
     TypePtr decayType(const TypePtr &type) const;
+    TypePtr promoteIntegerType(const TypePtr &type) const;
+    TypePtr commonIntegerType(const TypePtr &left, const TypePtr &right) const;
+    int integerRank(const TypePtr &type) const;
     std::string typeName(const TypePtr &type) const;
     [[noreturn]] void fail(const std::string &message) const;
     static int alignTo(int value, int alignment);

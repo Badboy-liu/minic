@@ -55,9 +55,6 @@ void SemanticAnalyzer::analyze(Program &program) {
             }
         }
 
-        if (function.parameters.size() > 4) {
-            fail("functions with more than 4 parameters are not supported yet: " + function.name);
-        }
     }
 
     for (const auto &function : program.functions) {
@@ -172,19 +169,7 @@ void SemanticAnalyzer::analyzeGlobal(GlobalVar &global) {
 
     analyzeExpr(*global.init);
     if (global.type->isArray()) {
-        if (global.init->kind == Expr::Kind::String &&
-            global.type->elementType->equals(*Type::makeChar())) {
-            const auto &stringExpr = static_cast<const StringExpr &>(*global.init);
-            if (static_cast<int>(stringExpr.value.size()) + 1 > global.type->arrayLength) {
-                fail("string literal is too long for global array: " + global.name);
-            }
-            return;
-        }
-        if (!isSupportedGlobalPointerArrayInitializer(global)) {
-            fail(
-                "global array initializers currently support only string literals for char[] or pointer initializer lists: " +
-                global.name);
-        }
+        validateArrayInitializer(global.name, global.type, *global.init, true);
         return;
     }
 
@@ -247,6 +232,101 @@ bool SemanticAnalyzer::isSupportedGlobalPointerArrayInitializer(const GlobalVar 
     return true;
 }
 
+bool SemanticAnalyzer::isSupportedStaticPointerInitializer(const Expr &expr) const {
+    if (expr.kind == Expr::Kind::String) {
+        return true;
+    }
+    if (expr.kind == Expr::Kind::Variable) {
+        const auto &variable = static_cast<const VariableExpr &>(expr);
+        return variable.isGlobal || variable.type->isFunction();
+    }
+    if (expr.kind != Expr::Kind::Unary) {
+        return false;
+    }
+
+    const auto &unary = static_cast<const UnaryExpr &>(expr);
+    if (unary.op != UnaryOp::AddressOf || unary.operand->kind != Expr::Kind::Variable) {
+        return false;
+    }
+
+    const auto &variable = static_cast<const VariableExpr &>(*unary.operand);
+    return variable.isGlobal && !variable.type->isArray();
+}
+
+bool SemanticAnalyzer::isSupportedPointerArrayElementInitializer(
+    const TypePtr &elementType,
+    const Expr &expr,
+    bool isGlobal) const {
+    if (!canAssign(elementType, expr.type)) {
+        return false;
+    }
+    if (!isSupportedStaticPointerInitializer(expr)) {
+        return false;
+    }
+    return true;
+}
+
+bool SemanticAnalyzer::isSupportedGlobalIntegerInitializer(const Expr &expr) const {
+    if (expr.kind == Expr::Kind::Number) {
+        return true;
+    }
+    if (expr.kind != Expr::Kind::Unary) {
+        return false;
+    }
+
+    const auto &unary = static_cast<const UnaryExpr &>(expr);
+    if ((unary.op != UnaryOp::Plus && unary.op != UnaryOp::Minus) ||
+        unary.operand->kind != Expr::Kind::Number) {
+        return false;
+    }
+    return true;
+}
+
+void SemanticAnalyzer::validateArrayInitializer(
+    const std::string &name,
+    const TypePtr &arrayType,
+    Expr &init,
+    bool isGlobal) {
+    if (init.kind == Expr::Kind::String && arrayType->elementType->equals(*Type::makeChar())) {
+        const auto &stringExpr = static_cast<const StringExpr &>(init);
+        if (static_cast<int>(stringExpr.value.size()) + 1 > arrayType->arrayLength) {
+            fail("string literal is too long for " + std::string(isGlobal ? "global" : "local") + " array: " + name);
+        }
+        return;
+    }
+
+    if (init.kind != Expr::Kind::InitializerList) {
+        fail(
+            std::string(isGlobal ? "global" : "local") +
+            " array initializers currently support only char[] string literals or initializer lists: " + name);
+    }
+
+    const auto &list = static_cast<const InitializerListExpr &>(init);
+    if (static_cast<int>(list.elements.size()) > arrayType->arrayLength) {
+        fail("too many elements in " + std::string(isGlobal ? "global" : "local") + " array initializer: " + name);
+    }
+
+    for (const auto &element : list.elements) {
+        if (!canAssign(arrayType->elementType, element->type)) {
+            fail(
+                "array initializer element type mismatch for " + name + ": expected " +
+                typeName(arrayType->elementType) + ", got " + typeName(element->type));
+        }
+        if (arrayType->elementType->isPointer()) {
+            if (!isSupportedPointerArrayElementInitializer(arrayType->elementType, *element, isGlobal)) {
+                fail(
+                    std::string(isGlobal ? "global" : "local") +
+                    " pointer array initializers currently support only function names, '&function', '&global', or string literals: " +
+                    name);
+            }
+            continue;
+        }
+        if (isGlobal && arrayType->elementType->isInteger() && !isSupportedGlobalIntegerInitializer(*element)) {
+            fail("global integer array initializers currently support only integer constants: " + name);
+        }
+    }
+}
+
 void SemanticAnalyzer::analyzeBlock(BlockStmt &block) {
     enterScope();
     for (auto &statement : block.statements) {
@@ -283,7 +363,8 @@ void SemanticAnalyzer::analyzeStatement(Stmt &stmt) {
         if (decl.init) {
             analyzeExpr(*decl.init);
             if (decl.type->isArray()) {
-                fail("array initializers are not supported yet");
+                validateArrayInitializer(decl.name, decl.type, *decl.init, false);
+                break;
             }
             if (!canAssign(decl.type, decl.init->type)) {
                 fail("cannot initialize " + decl.name + " of type " + typeName(decl.type) + " with " + typeName(decl.init->type));
@@ -384,7 +465,7 @@ void SemanticAnalyzer::analyzeExpr(Expr &expr) {
             if (!unary.operand->type->isInteger()) {
                 fail("unary +/- requires int operand");
             }
-            expr.type = Type::makeInt();
+            expr.type = promoteIntegerType(unary.operand->type);
             expr.isLValue = false;
             return;
         case UnaryOp::LogicalNot:
@@ -423,7 +504,7 @@ void SemanticAnalyzer::analyzeExpr(Expr &expr) {
         switch (binary.op) {
         case BinaryOp::Add:
             if (leftType->isInteger() && rightType->isInteger()) {
-                expr.type = Type::makeInt();
+                expr.type = commonIntegerType(leftType, rightType);
             } else if (leftType->isPointer() && rightType->isInteger()) {
                 expr.type = leftType;
             } else if (leftType->isInteger() && rightType->isPointer()) {
@@ -435,7 +516,7 @@ void SemanticAnalyzer::analyzeExpr(Expr &expr) {
             return;
         case BinaryOp::Subtract:
             if (leftType->isInteger() && rightType->isInteger()) {
-                expr.type = Type::makeInt();
+                expr.type = commonIntegerType(leftType, rightType);
             } else if (leftType->isPointer() && rightType->isInteger()) {
                 expr.type = leftType;
             } else {
@@ -448,7 +529,7 @@ void SemanticAnalyzer::analyzeExpr(Expr &expr) {
             if (!leftType->isInteger() || !rightType->isInteger()) {
                 fail("arithmetic operator requires int operands");
             }
-            expr.type = Type::makeInt();
+            expr.type = commonIntegerType(leftType, rightType);
             expr.isLValue = false;
             return;
         case BinaryOp::Equal:
@@ -631,6 +712,41 @@ bool SemanticAnalyzer::isEquivalentArgumentType(const TypePtr &param, const Type
 
 TypePtr SemanticAnalyzer::decayType(const TypePtr &type) const {
     return type->decay();
+}
+
+TypePtr SemanticAnalyzer::promoteIntegerType(const TypePtr &type) const {
+    if (!type->isInteger()) {
+        return type;
+    }
+    if (type->kind == TypeKind::Char || type->kind == TypeKind::Short) {
+        return Type::makeInt();
+    }
+    return std::make_shared<Type>(*type);
+}
+
+TypePtr SemanticAnalyzer::commonIntegerType(const TypePtr &left, const TypePtr &right) const {
+    TypePtr promotedLeft = promoteIntegerType(left);
+    TypePtr promotedRight = promoteIntegerType(right);
+    return integerRank(promotedLeft) >= integerRank(promotedRight)
+        ? promotedLeft
+        : promotedRight;
+}
+
+int SemanticAnalyzer::integerRank(const TypePtr &type) const {
+    switch (type->kind) {
+    case TypeKind::Char:
+        return 1;
+    case TypeKind::Short:
+        return 2;
+    case TypeKind::Int:
+        return 3;
+    case TypeKind::Long:
+        return 4;
+    case TypeKind::LongLong:
+        return 5;
+    default:
+        return 0;
+    }
 }
 
 std::string SemanticAnalyzer::typeName(const TypePtr &type) const {

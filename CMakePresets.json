@@ -72,6 +72,32 @@
           "label": "relocations"
         }
       }
+    },
+    {
+      "name": "linker-failures",
+      "configurePreset": "default",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "label": "linker-failures"
+        }
+      }
+    },
+    {
+      "name": "linux-link",
+      "configurePreset": "default",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "label": "linux-link"
+        }
+      }
     }
   ]
 }

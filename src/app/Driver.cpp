@@ -15,13 +15,26 @@
 
 namespace fs = std::filesystem;
 
-int Driver::run(const std::vector<std::string> &args) {
+int Driver::run(const fs::path &selfPath, const std::vector<std::string> &args) {
     const Options options = parseOptions(args);
+    const TargetSpec &target = targetSpec(options.target);
+    std::vector<fs::path> sourceInputs;
+    std::vector<fs::path> objectInputs;
+    for (const auto &inputPath : options.inputPaths) {
+        if (isObjectInput(inputPath)) {
+            objectInputs.push_back(inputPath);
+        } else {
+            sourceInputs.push_back(inputPath);
+        }
+    }
+    if (!objectInputs.empty() && (options.assemblyOnly || options.compileOnly)) {
+        throw std::runtime_error("existing object inputs are only supported for final linking");
+    }
 
     Program combinedProgram;
     std::vector<std::size_t> functionCounts;
     std::vector<std::size_t> globalCounts;
-    for (const auto &inputPath : options.inputPaths) {
+    for (const auto &inputPath : sourceInputs) {
         const std::string source = readFile(inputPath);
         Lexer lexer(source);
         Parser parser(lexer.tokenize());
@@ -36,35 +49,38 @@ int Driver::run(const std::vector<std::string> &args) {
         }
     }
 
-    SemanticAnalyzer semanticAnalyzer;
-    semanticAnalyzer.analyze(combinedProgram);
-
     std::vector<Function> globalDefinitions;
     std::vector<GlobalVar> globalVariables;
-    for (const auto &function : combinedProgram.functions) {
-        if (!function.isDeclaration()) {
-            Function declaration;
-            declaration.name = function.name;
-            declaration.returnType = function.returnType;
-            declaration.parameters = function.parameters;
-            globalDefinitions.push_back(std::move(declaration));
+    if (!sourceInputs.empty()) {
+        SemanticAnalyzer semanticAnalyzer;
+        semanticAnalyzer.analyze(combinedProgram);
+
+        for (const auto &function : combinedProgram.functions) {
+            if (!function.isDeclaration()) {
+                Function declaration;
+                declaration.name = function.name;
+                declaration.returnType = function.returnType;
+                declaration.parameters = function.parameters;
+                globalDefinitions.push_back(std::move(declaration));
+            }
         }
-    }
-    for (const auto &global : combinedProgram.globals) {
-        GlobalVar declaration;
-        declaration.type = global.type;
-        declaration.name = global.name;
-        declaration.symbolName = global.symbolName;
-        declaration.isExternal = true;
-        globalVariables.push_back(std::move(declaration));
+        for (const auto &global : combinedProgram.globals) {
+            GlobalVar declaration;
+            declaration.type = global.type;
+            declaration.name = global.name;
+            declaration.symbolName = global.symbolName;
+            declaration.isExternal = true;
+            globalVariables.push_back(std::move(declaration));
+        }
     }
 
     CodeGenerator generator(options.target);
     const fs::path outputDirectory = options.outputPath.parent_path().empty()
         ? fs::path(".")
         : options.outputPath.parent_path();
-    const std::string objectExtension = options.target == TargetKind::WindowsX64 ? ".obj" : ".o";
+    const std::string objectExtension = target.objectExtension;
 
+    std::vector<fs::path> generatedObjPaths;
     std::vector<fs::path> objPaths;
     std::size_t functionOffset = 0;
     std::size_t globalOffset = 0;
@@ -73,7 +89,7 @@ int Driver::run(const std::vector<std::string> &args) {
 
     const ToolchainPaths toolchain = Toolchain::detect();
 
-    for (std::size_t i = 0; i < options.inputPaths.size(); ++i) {
+    for (std::size_t i = 0; i < sourceInputs.size(); ++i) {
         Program fileProgram;
         const std::size_t count = functionCounts[i];
         const std::size_t globalCount = globalCounts[i];
@@ -127,7 +143,7 @@ int Driver::run(const std::vector<std::string> &args) {
         functionOffset += count;
         globalOffset += globalCount;
 
-        const fs::path stem = options.inputPaths[i].stem();
+        const fs::path stem = sourceInputs[i].stem();
         const fs::path asmPath = (!multipleInputs && options.asmPathExplicit)
             ? options.asmPath
             : outputDirectory / (stem.string() + ".asm");
@@ -142,9 +158,12 @@ int Driver::run(const std::vector<std::string> &args) {
         if (!options.assemblyOnly) {
             Toolchain::assembleObject(toolchain, options.target, asmPath, objPath);
             objPaths.push_back(objPath);
+            generatedObjPaths.push_back(objPath);
             std::cout << "Generated object: " << objPath.string() << '\n';
         }
     }
+
+    objPaths.insert(objPaths.end(), objectInputs.begin(), objectInputs.end());
 
     if (options.assemblyOnly) {
         return 0;
@@ -154,10 +173,15 @@ int Driver::run(const std::vector<std::string> &args) {
         return 0;
     }
 
-    Toolchain::linkObjects(options.target, objPaths, options.outputPath, options.linkTrace);
+    Toolchain::invokeExternalLinker(
+        linkerExecutablePath(selfPath),
+        options.target,
+        objPaths,
+        options.outputPath,
+        options.linkTrace);
 
     if (!options.keepObject) {
-        for (const auto &objPath : objPaths) {
+        for (const auto &objPath : generatedObjPaths) {
             if (fs::exists(objPath)) {
                 fs::remove(objPath);
             }
@@ -216,19 +240,41 @@ Driver::Options Driver::parseOptions(const std::vector<std::string> &args) const
             options.inputPaths.size() == 1 ? options.inputPaths[0].stem().string() : "a";
         std::string extension;
         if (options.compileOnly) {
-            extension = options.target == TargetKind::WindowsX64 ? ".obj" : ".o";
+            extension = targetSpec(options.target).objectExtension;
         } else {
-            extension = options.target == TargetKind::WindowsX64 ? ".exe" : "";
+            extension = targetSpec(options.target).executableExtension;
         }
         options.outputPath = fs::path("build") / "output" / (outputName + extension);
     } else if (options.compileOnly && !options.outputPath.has_extension()) {
-        options.outputPath += options.target == TargetKind::WindowsX64 ? ".obj" : ".o";
+        options.outputPath += targetSpec(options.target).objectExtension;
     }
     if (options.asmPath.empty()) {
         options.asmPath = options.outputPath.parent_path() / (options.outputPath.stem().string() + ".asm");
     }
 
     return options;
+}
+
+fs::path Driver::linkerExecutablePath(const fs::path &selfPath) {
+    fs::path resolved = selfPath;
+    if (resolved.empty()) {
+        resolved = fs::current_path() / "minic.exe";
+    } else if (resolved.is_relative()) {
+        resolved = fs::current_path() / resolved;
+    }
+    resolved = resolved.lexically_normal();
+
+    std::string extension = resolved.extension().string();
+    if (extension.empty()) {
+        extension = ".exe";
+    }
+
+    return resolved.parent_path() / ("minic-link" + extension);
+}
+
+bool Driver::isObjectInput(const fs::path &path) {
+    const std::string extension = path.extension().string();
+    return extension == ".obj" || extension == ".o";
 }
 
 std::string Driver::readFile(const fs::path &path) {

@@ -1,3 +1,7 @@
+int first(int *p) {
+    return p[0];
+}
+
 int main() {
-    return add7(35);
+    return first(1);
 }

@@ -1,6 +1,7 @@
-int mix(int a, int b, int c, int d) {
-    return a + b * 10 + c * 100 + d * 1000;
+int tail_mix(int a, int b, int c, int d, int e, int f) {
+    return e * 10 + f;
 }
+
 int main() {
-    return mix(1, 2, 0, 0);
+    return tail_mix(0, 0, 0, 0, 4, 2);
 }

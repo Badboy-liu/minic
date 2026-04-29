@@ -4,12 +4,14 @@ This document describes the current built-in Windows PE/COFF linker in `minic`.
 
 It is intentionally small and teaching-oriented. The goal is not broad compatibility with arbitrary COFF producers. The goal is a clear model that matches the compiler's own NASM-generated AMD64 object files.
 
+Linux executable linking is now a separate WSL-hosted system-linker path and remains outside the scope of this document.
+
 Document type:
 
 - long-lived support document
 - describes the current linker behavior and supported boundary
 
-For the overall project map, see [docs/README.md](/E:/project/cpp/minic/docs/README.md).
+For the overall project map, see [docs/README.md](README.md).
 
 ## Scope
 
@@ -17,6 +19,7 @@ The linker currently supports:
 
 - Windows AMD64 PE executable output
 - one or more NASM-generated AMD64 COFF object files
+- mixed `minic`-generated objects and small hand-written NASM AMD64 COFF helper objects on the documented subset
 - compiler-generated functions, globals, and entry point symbols
 - a small DLL-aware import map across `kernel32.dll` and `msvcrt.dll`
 
@@ -27,6 +30,7 @@ The linker currently does not try to support:
 - resources, TLS, unwind metadata, or debug sections
 - PE rebasing support via a base relocation table
 - Linux or ELF executable linking
+- WSL-hosted Linux system-linker behavior, which is documented at the project level rather than as part of `PeLinker`
 
 ## Expected Inputs
 
@@ -104,6 +108,7 @@ This is enough to demonstrate real linker behavior for small multi-file examples
 The current linker supports:
 
 - AMD64 COFF `REL32` relocations applied from `.text`
+- AMD64 COFF `ADDR64` relocations applied from `.text` on the current teaching subset
 - AMD64 COFF `ADDR64` relocations applied from initialized data sections in the current compiler-generated subset
 
 This is the main relocation shape used by the compiler's current code generation path.
@@ -118,6 +123,7 @@ A supported `REL32` relocation may target:
 
 A supported `ADDR64` relocation may currently target:
 
+- a recognized merged-section symbol referenced directly from `.text`
 - a compiler-generated global object address stored in `.data`
 - a compiler-generated string literal address stored in `.data`
 - a compiler-generated function address stored in `.data`
@@ -227,6 +233,8 @@ The trace prints four high-level blocks:
 
 The trace is meant to explain what the linker is doing, not to dump the entire binary.
 
+Each block now begins with a short summary line so the teaching path is easier to skim before reading the detailed entries.
+
 In the input-object block, the linker now also prints the externally visible symbols and unresolved extern references that matter to the current teaching subset.
 
 ## Manual Verification
@@ -254,6 +262,7 @@ Fastest commands:
 ```powershell
 ctest --preset phase-current
 ctest --preset bss
+ctest --preset linker-failures
 ```
 
 Run:
@@ -267,9 +276,11 @@ The regression currently covers:
 - baseline single-file code generation and linking
 - `.bss` integrity with `--link-trace`
 - multi-object PE linking with `--link-trace`
+- mixed C plus NASM-object linking on the documented subset
 - global pointer initializer relocations with `--link-trace`
 - function-pointer and function-pointer-table relocations with `--link-trace`
 - DLL-aware imports from `kernel32.dll` and `msvcrt.dll`
+- explicit linker-failure teaching cases such as duplicate symbols and unsupported relocation/section shapes
 
 Each regression case is declared in `CMakeLists.txt`, where the test lists:
 
@@ -295,6 +306,21 @@ Expected exit code:
 42
 ```
 
+### Mixed C plus hand-written NASM object
+
+```powershell
+D:\software\nasm\nasm.exe -f win64 -o .\build\test-objects\tmp_link_text_addr64_helper.obj .\input\tmp_link_text_addr64_helper.asm
+.\build\Debug\minic.exe .\input\tmp_link_text_addr64_main.c .\build\test-objects\tmp_link_text_addr64_helper.obj --link-trace -o .\build\output\tmp_link_text_addr64_manual.exe
+.\build\output\tmp_link_text_addr64_manual.exe
+$LASTEXITCODE
+```
+
+Expected exit code:
+
+```text
+42
+```
+
 ## Common Failure Modes
 
 The current linker is expected to fail clearly for cases such as:
@@ -304,5 +330,6 @@ The current linker is expected to fail clearly for cases such as:
 - duplicate external symbol
 - unsupported COFF relocation type
 - unsupported target section in a relocation
+- object metadata that is truncated or too small to be valid COFF
 
-These failures are part of the current teaching boundary. They are not yet polished into a general-purpose diagnostic system.
+These failures are part of the current teaching boundary. The diagnostics now prefer a `linker diagnostic:` prefix and include the relevant object path, symbol, or section when that context is available.

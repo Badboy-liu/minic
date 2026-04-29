@@ -165,6 +165,20 @@ std::string hex32(std::uint32_t value) {
     return out.str();
 }
 
+std::string linkerDiagnostic(const std::string &detail) {
+    return "linker diagnostic: " + detail;
+}
+
+std::string objectDiagnostic(const fs::path &path, const std::string &detail) {
+    return linkerDiagnostic(path.string() + ": " + detail);
+}
+
+std::string countLabel(std::size_t count, const char *singular, const char *plural) {
+    std::ostringstream out;
+    out << count << " " << (count == 1 ? singular : plural);
+    return out.str();
+}
+
 std::string targetDescription(const Symbol &symbol, std::int32_t addend) {
     if (symbol.sectionNumber == UndefinedSection && isImportedSymbolName(symbol.name)) {
         return "import " + symbol.name;
@@ -327,19 +341,19 @@ std::string readSymbolName(
 ObjectFile readObject(const fs::path &path) {
     std::ifstream in(path, std::ios::binary);
     if (!in) {
-        throw std::runtime_error("failed to open object file: " + path.string());
+        throw std::runtime_error(objectDiagnostic(path, "failed to open object file"));
     }
 
     ObjectFile object;
     object.path = path;
     object.bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
     if (object.bytes.size() < 20) {
-        throw std::runtime_error("object file is too small");
+        throw std::runtime_error(objectDiagnostic(path, "object file is too small"));
     }
 
     const std::uint16_t machine = read16(object.bytes, 0);
     if (machine != MachineAmd64) {
-        throw std::runtime_error("only AMD64 COFF objects are supported");
+        throw std::runtime_error(objectDiagnostic(path, "only AMD64 COFF objects are supported"));
     }
 
     const std::uint16_t sectionCount = read16(object.bytes, 2);
@@ -351,7 +365,7 @@ ObjectFile readObject(const fs::path &path) {
     for (std::uint16_t i = 0; i < sectionCount; ++i) {
         const std::size_t offset = sectionTableOffset + static_cast<std::size_t>(i) * 40;
         if (offset + 40 > object.bytes.size()) {
-            throw std::runtime_error("truncated COFF section table");
+            throw std::runtime_error(objectDiagnostic(path, "truncated COFF section table"));
         }
 
         Section section;
@@ -370,7 +384,7 @@ ObjectFile readObject(const fs::path &path) {
     while (index < symbolCount) {
         const std::size_t offset = symbolTableOffset + static_cast<std::size_t>(index) * 18;
         if (offset + 18 > object.bytes.size()) {
-            throw std::runtime_error("truncated COFF symbol table");
+            throw std::runtime_error(objectDiagnostic(path, "truncated COFF symbol table"));
         }
 
         Symbol symbol;
@@ -396,7 +410,7 @@ std::size_t findTextSectionIndex(const ObjectFile &object) {
             return i;
         }
     }
-    throw std::runtime_error("object file does not contain a .text section");
+    throw std::runtime_error(objectDiagnostic(object.path, "object file does not contain a .text section"));
 }
 
 std::vector<Relocation> readRelocations(const ObjectFile &object, const Section &section) {
@@ -404,7 +418,8 @@ std::vector<Relocation> readRelocations(const ObjectFile &object, const Section 
     for (std::uint16_t i = 0; i < section.relocationCount; ++i) {
         const std::size_t offset = section.relocationPointer + static_cast<std::size_t>(i) * 10;
         if (offset + 10 > object.bytes.size()) {
-            throw std::runtime_error("truncated COFF relocation table");
+            throw std::runtime_error(
+                objectDiagnostic(object.path, "truncated COFF relocation table in section " + section.name));
         }
 
         relocations.push_back(Relocation{
@@ -546,18 +561,23 @@ std::uint32_t resolveRelocationTargetRva(
         const Section &section = linkedObject.object.sections[symbol.sectionNumber - 1];
         const auto sectionRva = sectionRvas.find(section.name);
         if (sectionRva == sectionRvas.end()) {
-            throw std::runtime_error("unsupported target section in relocation: " + section.name);
+            throw std::runtime_error(
+                objectDiagnostic(
+                    linkedObject.object.path,
+                    "unsupported target section in relocation: " + section.name + " for symbol " + symbol.name));
         }
         return sectionRva->second + linkedObject.sectionOffsets[symbol.sectionNumber - 1] + symbol.value;
     }
     if (symbol.sectionNumber == UndefinedSection) {
         const auto found = externalSymbols.find(symbol.name);
         if (found == externalSymbols.end()) {
-            throw std::runtime_error("unresolved external symbol: " + symbol.name);
+            throw std::runtime_error(
+                objectDiagnostic(linkedObject.object.path, "unresolved external symbol: " + symbol.name));
         }
         return found->second;
     }
-    throw std::runtime_error("unsupported external symbol in relocation: " + symbol.name);
+    throw std::runtime_error(
+        objectDiagnostic(linkedObject.object.path, "unsupported external symbol in relocation: " + symbol.name));
 }
 
 void applyRelocations(
@@ -570,14 +590,14 @@ void applyRelocations(
     const std::size_t textSectionIndex = findTextSectionIndex(object);
     const Section &textSection = object.sections[textSectionIndex];
     for (const auto &relocation : readRelocations(object, textSection)) {
-        if (relocation.type != RelAmd64Rel32) {
-            throw std::runtime_error("unsupported COFF relocation type: " + std::to_string(relocation.type));
+        if (relocation.type != RelAmd64Rel32 && relocation.type != RelAmd64Addr64) {
+            throw std::runtime_error(
+                objectDiagnostic(
+                    object.path,
+                    "unsupported COFF relocation type: " + std::to_string(relocation.type) + " in section .text"));
         }
         if (relocation.symbolIndex >= object.symbols.size()) {
-            throw std::runtime_error("relocation references invalid symbol index");
-        }
-        if (linkedObject.sectionOffsets[textSectionIndex] + relocation.offset + 4 > textLayout.bytes.size()) {
-            throw std::runtime_error("relocation points outside .text");
+            throw std::runtime_error(objectDiagnostic(object.path, "relocation references invalid symbol index"));
         }
 
         const Symbol &symbol = object.symbols[relocation.symbolIndex];
@@ -586,37 +606,73 @@ void applyRelocations(
             symbol,
             sectionRvas,
             externalSymbols);
+        if (relocation.type == RelAmd64Rel32) {
+            if (linkedObject.sectionOffsets[textSectionIndex] + relocation.offset + 4 > textLayout.bytes.size()) {
+                throw std::runtime_error(objectDiagnostic(object.path, "REL32 relocation points outside .text"));
+            }
 
-        const std::uint32_t relocationRva =
-            sectionRvas.at(".text") + linkedObject.sectionOffsets[textSectionIndex] + relocation.offset;
-        const std::int32_t addend = readS32(
+            const std::uint32_t relocationRva =
+                sectionRvas.at(".text") + linkedObject.sectionOffsets[textSectionIndex] + relocation.offset;
+            const std::int32_t addend = readS32(
+                textLayout.bytes,
+                linkedObject.sectionOffsets[textSectionIndex] + relocation.offset);
+            const std::int64_t relative = static_cast<std::int64_t>(targetRva) +
+                static_cast<std::int64_t>(addend) -
+                static_cast<std::int64_t>(relocationRva + 4);
+            if (relative < INT32_MIN || relative > INT32_MAX) {
+                throw std::runtime_error(objectDiagnostic(object.path, "REL32 relocation out of range"));
+            }
+            if (traceEntries) {
+                const std::int64_t effectiveTarget =
+                    static_cast<std::int64_t>(targetRva) + static_cast<std::int64_t>(addend);
+                traceEntries->push_back(RelocationTraceEntry{
+                    linkedObject.object.path,
+                    ".text",
+                    relocation.offset,
+                    "REL32",
+                    targetDescription(symbol, addend),
+                    static_cast<std::uint32_t>(effectiveTarget),
+                    addend,
+                    static_cast<std::int32_t>(relative),
+                    0,
+                    false});
+            }
+            write32(
+                textLayout.bytes,
+                linkedObject.sectionOffsets[textSectionIndex] + relocation.offset,
+                static_cast<std::uint32_t>(static_cast<std::int32_t>(relative)));
+            continue;
+        }
+
+        if (linkedObject.sectionOffsets[textSectionIndex] + relocation.offset + 8 > textLayout.bytes.size()) {
+            throw std::runtime_error(objectDiagnostic(object.path, "ADDR64 relocation points outside .text"));
+        }
+        const std::int64_t addend = readS64(
             textLayout.bytes,
             linkedObject.sectionOffsets[textSectionIndex] + relocation.offset);
-        const std::int64_t relative = static_cast<std::int64_t>(targetRva) +
-            static_cast<std::int64_t>(addend) -
-            static_cast<std::int64_t>(relocationRva + 4);
-        if (relative < INT32_MIN || relative > INT32_MAX) {
-            throw std::runtime_error("REL32 relocation out of range");
-        }
+        const std::uint64_t storedValue = static_cast<std::uint64_t>(
+            static_cast<std::int64_t>(ImageBase) +
+            static_cast<std::int64_t>(targetRva) +
+            addend);
         if (traceEntries) {
             const std::int64_t effectiveTarget =
-                static_cast<std::int64_t>(targetRva) + static_cast<std::int64_t>(addend);
+                static_cast<std::int64_t>(targetRva) + addend;
             traceEntries->push_back(RelocationTraceEntry{
                 linkedObject.object.path,
                 ".text",
                 relocation.offset,
-                "REL32",
-                targetDescription(symbol, addend),
+                "ADDR64",
+                targetDescription64(symbol, addend),
                 static_cast<std::uint32_t>(effectiveTarget),
                 addend,
-                static_cast<std::int32_t>(relative),
                 0,
-                false});
+                storedValue,
+                true});
         }
-        write32(
+        write64(
             textLayout.bytes,
             linkedObject.sectionOffsets[textSectionIndex] + relocation.offset,
-            static_cast<std::uint32_t>(static_cast<std::int32_t>(relative)));
+            storedValue);
     }
 }
 
@@ -639,21 +695,30 @@ void applyInitializedDataRelocations(
             continue;
         }
         if (layoutIt->isUninitializedData) {
-            throw std::runtime_error("unsupported relocation against uninitialized output section: " + section.name);
+            throw std::runtime_error(
+                objectDiagnostic(
+                    linkedObject.object.path,
+                    "unsupported relocation against uninitialized output section: " + section.name));
         }
 
         const std::uint32_t mergedSectionOffset = linkedObject.sectionOffsets[sectionIndex];
         for (const auto &relocation : readRelocations(linkedObject.object, section)) {
             if (relocation.type != RelAmd64Addr64) {
                 throw std::runtime_error(
-                    "unsupported COFF relocation type in " + section.name + ": " +
-                    std::to_string(relocation.type));
+                    objectDiagnostic(
+                        linkedObject.object.path,
+                        "unsupported COFF relocation type in " + section.name + ": " +
+                        std::to_string(relocation.type)));
             }
             if (relocation.symbolIndex >= linkedObject.object.symbols.size()) {
-                throw std::runtime_error("relocation references invalid symbol index");
+                throw std::runtime_error(
+                    objectDiagnostic(linkedObject.object.path, "relocation references invalid symbol index"));
             }
             if (mergedSectionOffset + relocation.offset + 8 > layoutIt->bytes.size()) {
-                throw std::runtime_error("relocation points outside merged section: " + section.name);
+                throw std::runtime_error(
+                    objectDiagnostic(
+                        linkedObject.object.path,
+                        "ADDR64 relocation points outside merged section: " + section.name));
             }
 
             const Symbol &symbol = linkedObject.object.symbols[relocation.symbolIndex];
@@ -704,7 +769,7 @@ void writeSectionName(std::vector<std::uint8_t> &file, std::size_t offset, const
 
 std::vector<LinkedObject> readLinkedObjects(const std::vector<fs::path> &objPaths) {
     if (objPaths.empty()) {
-        throw std::runtime_error("no object files to link");
+        throw std::runtime_error(linkerDiagnostic("no object files to link"));
     }
 
     std::vector<LinkedObject> linkedObjects;
@@ -744,7 +809,8 @@ std::vector<SectionLayout> mergeSections(std::vector<LinkedObject> &linkedObject
                 continue;
             }
             if (section.rawPointer + section.rawSize > linkedObject.object.bytes.size()) {
-                throw std::runtime_error("truncated section " + section.name + " in " + linkedObject.object.path.string());
+                throw std::runtime_error(
+                    objectDiagnostic(linkedObject.object.path, "truncated section " + section.name));
             }
             found->bytes.insert(
                 found->bytes.end(),
@@ -802,7 +868,10 @@ std::unordered_map<std::string, std::uint32_t> collectExternalSymbols(
                 sectionRva->second + linkedObject.sectionOffsets[symbol.sectionNumber - 1] + symbol.value;
             const auto [it, inserted] = symbols.emplace(symbol.name, rva);
             if (!inserted) {
-                throw std::runtime_error("duplicate external symbol: " + symbol.name);
+                throw std::runtime_error(
+                    linkerDiagnostic(
+                        "duplicate external symbol: " + symbol.name + " (again in " +
+                        linkedObject.object.path.string() + ")"));
             }
             if (traceEntries) {
                 traceEntries->push_back(ResolvedSymbolTraceEntry{
@@ -822,12 +891,17 @@ std::unordered_map<std::string, std::uint32_t> collectExternalSymbols(
 
 void traceInputObjects(std::ostream &out, const std::vector<LinkedObject> &linkedObjects) {
     out << "[link] input objects\n";
+    out << "[link]   summary " << countLabel(linkedObjects.size(), "object", "objects") << '\n';
     for (const auto &linkedObject : linkedObjects) {
         out << "[link] object " << linkedObject.object.path.string() << '\n';
+        std::size_t recognizedSectionCount = 0;
+        std::size_t externCount = 0;
+        std::size_t definedSymbolCount = 0;
         for (const auto &section : linkedObject.object.sections) {
             if (!isRecognizedSection(section.name)) {
                 continue;
             }
+            ++recognizedSectionCount;
             out << "[link]   section " << section.name
                 << " size=" << std::max(section.virtualSize, section.rawSize)
                 << " raw=" << section.rawSize
@@ -838,6 +912,7 @@ void traceInputObjects(std::ostream &out, const std::vector<LinkedObject> &linke
                 continue;
             }
             if (symbol.sectionNumber == UndefinedSection) {
+                ++externCount;
                 out << "[link]   extern " << symbol.name << '\n';
                 continue;
             }
@@ -849,10 +924,14 @@ void traceInputObjects(std::ostream &out, const std::vector<LinkedObject> &linke
             if (!isRecognizedSection(section.name)) {
                 continue;
             }
+            ++definedSymbolCount;
             out << "[link]   symbol " << symbol.name
                 << " section=" << section.name
                 << " value=" << hex32(symbol.value) << '\n';
         }
+        out << "[link]   summary sections=" << recognizedSectionCount
+            << " defined_symbols=" << definedSymbolCount
+            << " externs=" << externCount << '\n';
     }
 }
 
@@ -864,7 +943,11 @@ void traceMergedSections(
     std::uint32_t idataRawPointer,
     std::uint32_t idataRawSize) {
     out << "[link] merged sections\n";
+    std::uint32_t totalVirtualSize = idataVirtualSize;
+    std::uint32_t totalRawSize = idataRawSize;
     for (const auto &section : sections) {
+        totalVirtualSize += section.virtualSize;
+        totalRawSize += section.rawSize;
         out << "[link]   " << section.name
             << " rva=" << hex32(section.rva)
             << " vsize=" << section.virtualSize
@@ -878,6 +961,9 @@ void traceMergedSections(
         << " raw_size=" << idataRawSize
         << " raw_ptr=" << hex32(idataRawPointer)
         << " uninitialized=no\n";
+    out << "[link]   summary sections=" << (sections.size() + 1)
+        << " total_vsize=" << totalVirtualSize
+        << " total_raw_size=" << totalRawSize << '\n';
 }
 
 void traceResolvedSymbols(
@@ -904,6 +990,7 @@ void traceResolvedSymbols(
         });
 
     out << "[link] resolved symbols\n";
+    out << "[link]   summary " << countLabel(entries.size(), "symbol", "symbols") << '\n';
     for (const auto &entry : entries) {
         out << "[link]   " << entry.name
             << " -> " << hex32(entry.rva);
@@ -924,6 +1011,12 @@ void traceImports(std::ostream &out, const ImportLayout &imports) {
         out << "[link]   none\n";
         return;
     }
+    std::size_t importCount = 0;
+    for (const auto &group : imports.groups) {
+        importCount += group.symbols.size();
+    }
+    out << "[link]   summary groups=" << imports.groups.size()
+        << " imported_symbols=" << importCount << '\n';
     for (const auto &group : imports.groups) {
         out << "[link]   dll " << group.dllName << ": ";
         for (std::size_t i = 0; i < group.symbols.size(); ++i) {
@@ -938,6 +1031,7 @@ void traceImports(std::ostream &out, const ImportLayout &imports) {
 
 void traceRelocations(std::ostream &out, const std::vector<RelocationTraceEntry> &entries) {
     out << "[link] relocations\n";
+    out << "[link]   summary " << countLabel(entries.size(), "relocation", "relocations") << '\n';
     for (const auto &entry : entries) {
         out << "[link]   " << entry.objectPath.string()
             << " section=" << entry.sourceSectionName
@@ -975,7 +1069,7 @@ void PeLinker::linkObjects(
         sections.end(),
         [](const SectionLayout &layout) { return layout.name == ".text"; });
     if (textLayout == sections.end()) {
-        throw std::runtime_error("linked objects do not contain a .text section");
+        throw std::runtime_error(linkerDiagnostic("linked objects do not contain a .text section"));
     }
 
     const std::unordered_map<std::string, bool> definedSymbolNames =
@@ -1013,7 +1107,10 @@ void PeLinker::linkObjects(
         for (const auto &symbol : group.symbols) {
             const auto [it, inserted] = externalSymbols.emplace(symbol.symbolName, symbol.thunkRva);
             if (!inserted) {
-                throw std::runtime_error("duplicate external symbol: " + symbol.symbolName);
+                throw std::runtime_error(
+                    linkerDiagnostic(
+                        "duplicate external symbol: " + symbol.symbolName +
+                        " (import thunk collision for " + symbol.dllName + ")"));
             }
             const std::uint32_t thunkOffset = symbol.thunkRva - sectionRvas.at(".text");
             patchImportThunkDisplacement(textLayout->bytes, thunkOffset, symbol.thunkRva, symbol.iatRva);
@@ -1022,7 +1119,8 @@ void PeLinker::linkObjects(
 
     const auto entry = externalSymbols.find("mainCRTStartup");
     if (entry == externalSymbols.end()) {
-        throw std::runtime_error("missing entry symbol: mainCRTStartup");
+        throw std::runtime_error(
+            linkerDiagnostic("missing entry symbol: mainCRTStartup; provide a translation unit that defines main"));
     }
     const std::uint32_t entryRva = entry->second;
     std::vector<RelocationTraceEntry> relocationTraceEntries;

@@ -8,53 +8,95 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 enable_testing()
 
+set(MINIC_CORE_SOURCES
+    src/support/ProcessUtils.cpp
+    src/support/ProcessUtils.h
+    src/linker/LinkerBackend.cpp
+    src/linker/LinkerBackend.h
+    src/linker/BuiltinPeCoffLinkerBackend.cpp
+    src/linker/BuiltinPeCoffLinkerBackend.h
+    src/linker/WslGccElfLinkerBackend.cpp
+    src/linker/WslGccElfLinkerBackend.h
+    src/support/Toolchain.cpp
+    src/support/Toolchain.h
+    src/linker/PeLinker.cpp
+    src/linker/PeLinker.h
+    src/backend/CodeGenerator.cpp
+    src/backend/CodeGenerator.h
+    src/frontend/Semantics.cpp
+    src/frontend/Semantics.h
+    src/frontend/Parser.cpp
+    src/frontend/Parser.h
+    src/frontend/Lexer.cpp
+    src/frontend/Lexer.h
+    src/frontend/Token.cpp
+    src/frontend/Token.h
+    src/backend/Target.h
+    src/frontend/Ast.h
+)
+
 add_executable(${PROJECT_NAME}
-    src/main.cpp
-    src/Driver.cpp
-    src/Driver.h
-    src/Toolchain.cpp
-    src/Toolchain.h
-    src/PeLinker.cpp
-    src/PeLinker.h
-    src/CodeGenerator.cpp
-    src/CodeGenerator.h
-    src/Semantics.cpp
-    src/Semantics.h
-    src/Parser.cpp
-    src/Parser.h
-    src/Lexer.cpp
-    src/Lexer.h
-    src/Token.cpp
-    src/Token.h
-    src/Target.h
-    src/Ast.h
+    src/app/main.cpp
+    src/app/Driver.cpp
+    src/app/Driver.h
+    ${MINIC_CORE_SOURCES}
 )
 
-target_include_directories(${PROJECT_NAME}
-    PRIVATE
-        ${PROJECT_SOURCE_DIR}/src
+add_executable(minic-link
+    src/linker/link_main.cpp
+    src/linker/LinkerDriver.cpp
+    src/linker/LinkerDriver.h
+    ${MINIC_CORE_SOURCES}
 )
 
-target_compile_definitions(${PROJECT_NAME}
-    PRIVATE
-        NOMINMAX
-)
+function(configure_minic_target target_name)
+    target_include_directories(${target_name}
+        PRIVATE
+            ${PROJECT_SOURCE_DIR}/src
+            ${PROJECT_SOURCE_DIR}/src/app
+            ${PROJECT_SOURCE_DIR}/src/backend
+            ${PROJECT_SOURCE_DIR}/src/frontend
+            ${PROJECT_SOURCE_DIR}/src/linker
+            ${PROJECT_SOURCE_DIR}/src/support
+    )
+
+    target_compile_definitions(${target_name}
+        PRIVATE
+            NOMINMAX
+    )
+endfunction()
+
+configure_minic_target(${PROJECT_NAME})
+configure_minic_target(minic-link)
 
 if (WIN32)
     function(add_minic_regression_test test_name)
-        set(options)
-        set(oneValueArgs EXPECTED_EXIT OUTPUT_EXE)
-        set(multiValueArgs SOURCES COMPILER_ARGS TRACE_MARKERS OUTPUT_MARKERS ERROR_MARKERS LABELS)
+        set(options SKIP_RUN RUN_WITH_WSL SKIP_IF_WSL_UNAVAILABLE)
+        set(oneValueArgs EXPECTED_EXIT OUTPUT_EXE CHECK_FILE)
+        set(multiValueArgs SOURCES COMPILER_ARGS TRACE_MARKERS OUTPUT_MARKERS FILE_MARKERS ERROR_MARKERS LABELS)
         cmake_parse_arguments(TEST "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
 
         string(JOIN ";" source_files ${TEST_SOURCES})
         string(JOIN ";" compiler_args ${TEST_COMPILER_ARGS})
         string(JOIN ";" trace_markers ${TEST_TRACE_MARKERS})
         string(JOIN ";" output_markers ${TEST_OUTPUT_MARKERS})
+        string(JOIN ";" file_markers ${TEST_FILE_MARKERS})
         string(JOIN ";" error_markers ${TEST_ERROR_MARKERS})
         set(expect_compiler_failure)
         if (TEST_ERROR_MARKERS)
             set(expect_compiler_failure -ExpectCompilerFailure)
+        endif()
+        set(skip_run)
+        if (TEST_SKIP_RUN)
+            set(skip_run -SkipRun)
+        endif()
+        set(run_with_wsl)
+        if (TEST_RUN_WITH_WSL)
+            set(run_with_wsl -RunWithWsl)
+        endif()
+        set(skip_if_wsl_unavailable)
+        if (TEST_SKIP_IF_WSL_UNAVAILABLE)
+            set(skip_if_wsl_unavailable -SkipIfWslUnavailable)
         endif()
 
         add_test(
@@ -70,7 +112,12 @@ if (WIN32)
                 -ExpectedExit ${TEST_EXPECTED_EXIT}
                 -RequiredTraceMarkers "${trace_markers}"
                 -RequiredOutputMarkers "${output_markers}"
+                -CheckFile "${TEST_CHECK_FILE}"
+                -RequiredFileMarkers "${file_markers}"
                 ${expect_compiler_failure}
+                ${run_with_wsl}
+                ${skip_if_wsl_unavailable}
+                ${skip_run}
                 -RequiredErrorMarkers "${error_markers}"
         )
 
@@ -79,12 +126,129 @@ if (WIN32)
         endif()
     endfunction()
 
+    add_test(
+        NAME minic_standalone_linker_smoke
+        COMMAND powershell
+            -ExecutionPolicy Bypass
+            -File ${PROJECT_SOURCE_DIR}/tests/run_linker_regression_case.ps1
+            -CompilerPath $<TARGET_FILE:${PROJECT_NAME}>
+            -LinkerPath $<TARGET_FILE:minic-link>
+            -RepoRoot ${PROJECT_SOURCE_DIR}
+            -SourceFile input/answer.c
+            -OutputObject build/output/answer_link_only.obj
+            -OutputExe build/output/answer_link_only.exe
+            -ExpectedExit 42
+    )
+    set_tests_properties(minic_standalone_linker_smoke PROPERTIES LABELS "regression;phase-current;linker")
+
     add_minic_regression_test(
         minic_answer_baseline
         SOURCES input/answer.c
         OUTPUT_EXE build/output/answer.exe
         EXPECTED_EXIT 42
         LABELS regression phase-current
+    )
+
+    add_minic_regression_test(
+        minic_local_string_init
+        SOURCES input/tmp_string_local.c
+        OUTPUT_EXE build/output/tmp_string_local.exe
+        EXPECTED_EXIT 65
+        LABELS regression phase-current semantics
+    )
+
+    add_minic_regression_test(
+        minic_windows_stack_args
+        SOURCES input/tmp_four_args.c
+        OUTPUT_EXE build/output/tmp_four_args.exe
+        EXPECTED_EXIT 42
+        LABELS regression phase-current abi
+    )
+
+    add_minic_regression_test(
+        minic_bad_arity
+        SOURCES input/tmp_bad_arity.c
+        OUTPUT_EXE build/output/tmp_bad_arity.exe
+        EXPECTED_EXIT 0
+        ERROR_MARKERS "wrong number of arguments in function call"
+        LABELS regression phase-current semantics
+    )
+
+    add_minic_regression_test(
+        minic_bad_argument_type
+        SOURCES input/tmp_cross_no_decl_main.c
+        OUTPUT_EXE build/output/tmp_cross_no_decl_main.exe
+        EXPECTED_EXIT 0
+        ERROR_MARKERS "argument type mismatch in function call"
+        LABELS regression phase-current semantics
+    )
+
+    add_minic_regression_test(
+        minic_bad_return_type
+        SOURCES input/tmp_bad_void_var.c
+        OUTPUT_EXE build/output/tmp_bad_void_var.exe
+        EXPECTED_EXIT 0
+        ERROR_MARKERS "return type mismatch"
+        LABELS regression phase-current semantics
+    )
+
+    add_minic_regression_test(
+        minic_mixed_integer_conversions
+        SOURCES input/tmp_basic_types.c
+        OUTPUT_EXE build/output/tmp_basic_types.exe
+        EXPECTED_EXIT 42
+        LABELS regression phase-current semantics
+    )
+
+    add_minic_regression_test(
+        minic_local_int_array_init
+        SOURCES input/tmp_if.c
+        OUTPUT_EXE build/output/tmp_if.exe
+        EXPECTED_EXIT 42
+        LABELS regression phase-current initializers
+    )
+
+    add_minic_regression_test(
+        minic_global_int_array_init
+        SOURCES input/tmp_else.c
+        OUTPUT_EXE build/output/tmp_else.exe
+        EXPECTED_EXIT 42
+        LABELS regression phase-current initializers
+    )
+
+    add_minic_regression_test(
+        minic_local_ptr_array_init
+        SOURCES input/tmp_void_ptr.c
+        OUTPUT_EXE build/output/tmp_void_ptr.exe
+        EXPECTED_EXIT 42
+        LABELS regression phase-current initializers
+    )
+
+    add_minic_regression_test(
+        minic_array_too_many_elements
+        SOURCES input/tmp_bss_global_int.c
+        OUTPUT_EXE build/output/tmp_bss_global_int.exe
+        EXPECTED_EXIT 0
+        ERROR_MARKERS "too many elements in global array initializer"
+        LABELS regression phase-current initializers
+    )
+
+    add_minic_regression_test(
+        minic_array_bad_element_type
+        SOURCES input/tmp_ptr_add.c
+        OUTPUT_EXE build/output/tmp_ptr_add.exe
+        EXPECTED_EXIT 0
+        ERROR_MARKERS "array initializer element type mismatch"
+        LABELS regression phase-current initializers
+    )
+
+    add_minic_regression_test(
+        minic_local_ptr_array_invalid_source
+        SOURCES input/tmp_bss_global_array.c
+        OUTPUT_EXE build/output/tmp_bss_global_array.exe
+        EXPECTED_EXIT 0
+        ERROR_MARKERS "local pointer array initializers currently support only function names"
+        LABELS regression phase-current initializers
     )
 
     add_minic_regression_test(
@@ -105,7 +269,7 @@ if (WIN32)
         OUTPUT_EXE build/output/tmp_multi_trace.exe
         EXPECTED_EXIT 42
         TRACE_MARKERS "[link] input objects" "[link] merged sections" "[link] resolved symbols" "[link] relocations"
-        OUTPUT_MARKERS "extern fn_add7" "symbol fn_main" "symbol mainCRTStartup" "symbol fn_add7"
+        OUTPUT_MARKERS "extern fn_add7" "symbol fn_main" "symbol mainCRTStartup" "symbol fn_add7" "summary sections=" "summary 2 objects" "summary 2 relocations"
         LABELS regression phase-current multifile
     )
 
@@ -147,7 +311,7 @@ if (WIN32)
         SOURCES input/tmp_import_msvcrt_puts.c
         COMPILER_ARGS --link-trace
         OUTPUT_EXE build/output/tmp_import_msvcrt_puts.exe
-        EXPECTED_EXIT 0
+        EXPECTED_EXIT 1
         TRACE_MARKERS "[link] input objects" "[link] merged sections" "[link] imports" "[link] resolved symbols" "[link] relocations"
         OUTPUT_MARKERS "extern fn_puts" "dll msvcrt.dll: fn_puts" "fn_puts ->" "dll=msvcrt.dll"
         LABELS regression phase-current imports
@@ -171,7 +335,48 @@ if (WIN32)
         OUTPUT_EXE build/output/tmp_import_unresolved.exe
         EXPECTED_EXIT 0
         ERROR_MARKERS "unresolved external symbol: fn_MissingImport"
-        LABELS regression phase-current imports
+        LABELS regression phase-current imports linker-failures
+    )
+
+    add_minic_regression_test(
+        minic_text_addr64_relocation
+        SOURCES input/tmp_link_text_addr64_main.c input/tmp_link_text_addr64_helper.asm
+        COMPILER_ARGS --link-trace -o REPO:build/output/tmp_link_text_addr64.exe
+        OUTPUT_EXE build/output/tmp_link_text_addr64.exe
+        EXPECTED_EXIT 42
+        TRACE_MARKERS "[link] input objects" "[link] merged sections" "[link] resolved symbols" "[link] relocations"
+        OUTPUT_MARKERS "symbol gv_value" "symbol fn_read_global_through_abs" "section=.text" "type=ADDR64"
+        LABELS regression phase-current relocations
+    )
+
+    add_minic_regression_test(
+        minic_duplicate_external_symbol
+        SOURCES input/tmp_link_duplicate_main.c input/tmp_link_duplicate_one.asm input/tmp_link_duplicate_two.asm
+        COMPILER_ARGS --link-trace
+        OUTPUT_EXE build/output/tmp_link_duplicate.exe
+        EXPECTED_EXIT 0
+        ERROR_MARKERS "duplicate external symbol: fn_dupe"
+        LABELS regression phase-current linker-failures
+    )
+
+    add_minic_regression_test(
+        minic_unsupported_text_relocation
+        SOURCES input/tmp_link_bad_reloc_main.c input/tmp_link_bad_reloc_helper.asm
+        COMPILER_ARGS --link-trace
+        OUTPUT_EXE build/output/tmp_link_bad_reloc.exe
+        EXPECTED_EXIT 0
+        ERROR_MARKERS "unsupported COFF" "section .text"
+        LABELS regression phase-current linker-failures
+    )
+
+    add_minic_regression_test(
+        minic_unsupported_target_section
+        SOURCES input/tmp_link_bad_section_main.c input/tmp_link_bad_section_helper.asm
+        COMPILER_ARGS --link-trace
+        OUTPUT_EXE build/output/tmp_link_bad_section.exe
+        EXPECTED_EXIT 0
+        ERROR_MARKERS "linker diagnostic:" ".pdata"
+        LABELS regression phase-current linker-failures
     )
 
     add_minic_regression_test(
@@ -204,5 +409,97 @@ if (WIN32)
         EXPECTED_EXIT 0
         ERROR_MARKERS "function names"
         LABELS regression phase-current relocations
+    )
+
+    add_minic_regression_test(
+        minic_linux_stack_args_asm
+        SOURCES input/tmp_linux_stack_args.c
+        COMPILER_ARGS --target;x86_64-linux;-S;--emit-asm;REPO:build/output/tmp_linux_stack_args.asm
+        OUTPUT_EXE build/output/tmp_linux_stack_args.asm
+        EXPECTED_EXIT 0
+        CHECK_FILE build/output/tmp_linux_stack_args.asm
+        FILE_MARKERS
+            "global _start"
+            "mov r8d, dword [rsp+48]"
+            "mov r9d, dword [rsp+56]"
+            "mov eax, dword [rbp+16]"
+            "mov eax, dword [rbp+24]"
+            "sub rsp, 64"
+            "add rsp, 64"
+        SKIP_RUN
+        LABELS regression phase-current linux abi
+    )
+
+    add_minic_regression_test(
+        minic_linux_answer_link
+        SOURCES input/answer.c
+        COMPILER_ARGS --target;x86_64-linux;-o;REPO:build/output/answer_linux
+        OUTPUT_EXE build/output/answer_linux
+        EXPECTED_EXIT 42
+        RUN_WITH_WSL
+        SKIP_IF_WSL_UNAVAILABLE
+        LABELS regression phase-current linux linux-link
+    )
+
+    add_minic_regression_test(
+        minic_linux_stack_args_link
+        SOURCES input/tmp_linux_stack_args.c
+        COMPILER_ARGS --target;x86_64-linux;-o;REPO:build/output/tmp_linux_stack_args
+        OUTPUT_EXE build/output/tmp_linux_stack_args
+        EXPECTED_EXIT 42
+        RUN_WITH_WSL
+        SKIP_IF_WSL_UNAVAILABLE
+        LABELS regression phase-current linux linux-link abi
+    )
+
+    add_minic_regression_test(
+        minic_linux_global_array_link
+        SOURCES input/tmp_else.c
+        COMPILER_ARGS --target;x86_64-linux;-o;REPO:build/output/tmp_else_linux
+        OUTPUT_EXE build/output/tmp_else_linux
+        EXPECTED_EXIT 42
+        RUN_WITH_WSL
+        SKIP_IF_WSL_UNAVAILABLE
+        LABELS regression phase-current linux linux-link initializers
+    )
+
+    add_minic_regression_test(
+        minic_linux_rejects_windows_obj
+        SOURCES input/answer.c input/tmp_link_text_addr64_helper.asm
+        COMPILER_ARGS --target;x86_64-linux
+        OUTPUT_EXE build/output/linux_rejects_windows_obj
+        EXPECTED_EXIT 0
+        ERROR_MARKERS "target x86_64-linux only accepts ELF .o object inputs for final linking"
+        LABELS regression phase-current linux linux-link linker-failures
+    )
+
+    add_minic_regression_test(
+        minic_invalid_small_object
+        SOURCES input/answer.c input/tmp_invalid_small.obj
+        COMPILER_ARGS --link-trace
+        OUTPUT_EXE build/output/tmp_invalid_small.exe
+        EXPECTED_EXIT 0
+        ERROR_MARKERS "linker diagnostic:" "object file is too small"
+        LABELS regression phase-current linker-failures
+    )
+
+    add_minic_regression_test(
+        minic_missing_entry_symbol
+        SOURCES input/tmp_link_missing_entry.asm
+        COMPILER_ARGS --link-trace
+        OUTPUT_EXE build/output/tmp_link_missing_entry.exe
+        EXPECTED_EXIT 0
+        ERROR_MARKERS "missing entry symbol: mainCRTStartup" "defines main"
+        LABELS regression phase-current linker-failures
+    )
+
+    add_minic_regression_test(
+        minic_missing_text_section
+        SOURCES input/tmp_link_data_only.asm
+        COMPILER_ARGS --link-trace
+        OUTPUT_EXE build/output/tmp_link_data_only.exe
+        EXPECTED_EXIT 0
+        ERROR_MARKERS "linked objects do not contain a .text section"
+        LABELS regression phase-current linker-failures
     )
 endif()

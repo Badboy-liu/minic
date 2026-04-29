@@ -1,18 +1,12 @@
-void noop(void);
-void set_first(int *p, int value);
-
-void noop(void) {
-    return;
+int forty(void) {
+    return 40;
 }
 
-void set_first(int *p, int value) {
-    *p = value;
+int two(void) {
+    return 2;
 }
 
 int main() {
-    int x = 41;
-    int *p = &x;
-    noop();
-    set_first(p, x + 1);
-    return *p;
+    int (*table[2])(void) = { forty, two };
+    return table[0]() + table[1]();
 }

@@ -1,4 +1,4 @@
 int main() {
-    void bad;
-    return 0;
+    int values[1];
+    return &values[0];
 }

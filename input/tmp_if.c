@@ -1,7 +1,4 @@
 int main() {
-    int x = 1;
-    if (x) {
-        return 2;
-    }
-    return 3;
+    int values[4] = { 10, 20, 12 };
+    return values[0] + values[1] + values[2] + values[3];
 }

@@ -8,21 +8,21 @@ It implements the pipeline in clear stages:
 - Parsing: build an AST for a small C subset
 - Semantic analysis: resolve locals, reject undeclared or duplicate variables, compute stack layout
 - Code generation: emit Windows x64 NASM assembly
-- Linking: invoke `nasm` to produce a COFF `.obj`, then use the built-in PE linker to produce a working `.exe`
+- Linking: invoke `nasm` to produce an object, then hand final linking to the standalone `minic-link` driver
 
 ## Documentation
 
 Primary docs:
 
-- [Documentation Guide](/E:/project/cpp/minic/docs/README.md)
-- [Project Status Overview](/E:/project/cpp/minic/docs/project-status-overview.md)
-- [PE/COFF Linker Support](/E:/project/cpp/minic/docs/pe-coff-linker-support.md)
-- [minic Relocation Matrix](/E:/project/cpp/minic/docs/minic-relocation-matrix.md)
+- [Documentation Guide](docs/README.md)
+- [Project Status Overview](docs/project-status-overview.md)
+- [PE/COFF Linker Support](docs/pe-coff-linker-support.md)
+- [minic Relocation Matrix](docs/minic-relocation-matrix.md)
 
 Document types:
 
 - Long-lived docs describe the project as it works today.
-- Process docs under [docs/superpowers](/E:/project/cpp/minic/docs/superpowers) record design, planning, and progress history for specific workstreams.
+- Process docs under [docs/superpowers](docs/superpowers) record design, planning, and progress history for specific workstreams.
 
 ## Supported C subset
 
@@ -33,15 +33,19 @@ The current compiler supports:
 - external function declarations resolved either from other input objects or the built-in import map
 - global integer variables
 - global `char[]` variables
+- global integer arrays with initializer lists
 - global pointer initializers for `&global_object`
 - global pointer initializers for function names such as `int (*p)() = answer;`
 - global pointer initializers for string literals such as `char *p = "A";`
 - global function pointer arrays with initializer lists such as `int (*table[2])() = { one, two };`
 - tentative global definitions emitted via `.bss`
 - `void` functions
-- up to 4 `int` parameters per function
+- integer and pointer parameters, including Windows x64 stack-passed arguments beyond the first four
+- mixed integer-type arithmetic, assignment, argument passing, and `return` conversion across `char` / `short` / `int` / `long` / `long long`
 - pointer parameters and locals
 - local arrays of non-void element types
+- local integer arrays with initializer lists
+- local pointer arrays with restricted initializer lists
 - function calls
 - address-of `&`, dereference `*`, and `[]` indexing
 - local `int` declarations
@@ -77,6 +81,14 @@ The compiler writes generated files under `build/output/` by default:
 .\build\output\answer.exe
 ```
 
+The linker is also available as a standalone executable:
+
+```powershell
+.\build\Debug\minic-link.exe .\build\output\answer.obj -o .\build\output\answer_from_linker.exe
+```
+
+Internally, `minic-link` now dispatches through target-specific linker backends instead of keeping all Windows and Linux linker logic inside `Toolchain.cpp`. Today that means a built-in PE/COFF backend for `x86_64-windows` and a WSL-hosted system-linker backend for `x86_64-linux`.
+
 The default target is `x86_64-windows`. You can request targets explicitly:
 
 ```powershell
@@ -85,7 +97,7 @@ The default target is `x86_64-windows`. You can request targets explicitly:
 .\build\Debug\minic.exe .\input\answer.c --target x86_64-linux -c -o .\build\output\answer_linux.o
 ```
 
-Linux code generation currently supports NASM ELF64 assembly/object output. Linux executable linking is not implemented yet.
+Linux code generation currently supports NASM ELF64 assembly/object output, including SysV-style integer/pointer argument passing through `rdi, rsi, rdx, rcx, r8, r9` plus stack arguments beyond the first six. Linux executable linking now goes through a WSL-hosted system linker path (`wsl gcc -nostdlib -no-pie ...`), so it requires a working WSL distribution with `gcc` installed.
 
 You can also compile multiple files into one executable:
 
@@ -93,9 +105,22 @@ You can also compile multiple files into one executable:
 .\build\Debug\minic.exe .\input\file1.c .\input\file2.c -o .\build\output\app.exe
 ```
 
+You can also link existing Windows COFF objects alongside C inputs on the supported teaching path:
+
+```powershell
+.\build\Debug\minic.exe .\input\main.c .\build\output\helper.obj -o .\build\output\app.exe
+```
+
+Or invoke the linker directly once objects already exist:
+
+```powershell
+.\build\Debug\minic.exe .\input\answer.c -c -o .\build\output\answer.obj
+.\build\Debug\minic-link.exe .\build\output\answer.obj -o .\build\output\answer_link_only.exe
+```
+
 Each input file is compiled into its own NASM assembly file and object file. The built-in PE linker then resolves external function symbols across those objects, so functions defined in one `.c` file can be called from another `.c` file.
 
-Global variables are emitted into `.data` when initialized and `.bss` when they are uninitialized/tentative definitions. The built-in PE linker preserves section-relative offsets for NASM COFF `REL32` relocations, so multiple globals placed in `.bss` keep distinct addresses in the final executable. It also supports the current compiler's minimal `.data` `ADDR64` relocation path for global pointer initializers such as `int *p = &x;`, `char *p = "A";`, `int (*fn_ptr)() = answer;`, and `int (*fn_table[2])() = { one, two };`.
+Global variables are emitted into `.data` when initialized and `.bss` when they are uninitialized/tentative definitions. The built-in PE linker preserves section-relative offsets for NASM COFF `REL32` relocations, so multiple globals placed in `.bss` keep distinct addresses in the final executable. It also supports the current compiler's minimal `.data` `ADDR64` relocation path for global pointer initializers such as `int *p = &x;`, `char *p = "A";`, `int (*fn_ptr)() = answer;`, and `int (*fn_table[2])() = { one, two };`. It now also supports the current teaching subset of `.text` `ADDR64` relocations, which makes small hand-written NASM helper objects linkable on the Windows path.
 
 The linker now also supports a small teaching-oriented import map across multiple DLLs. Today that includes:
 
@@ -131,6 +156,18 @@ Fastest way to run only the relocation teaching cases:
 ctest --preset relocations
 ```
 
+Fastest way to run only the explicit linker failure teaching cases:
+
+```powershell
+ctest --preset linker-failures
+```
+
+Fastest way to run the Linux system-linker teaching cases:
+
+```powershell
+ctest --preset linux-link
+```
+
 ## Manual Verification
 
 Sample program:
@@ -164,6 +201,34 @@ To verify multi-object PE linking:
 $LASTEXITCODE
 ```
 
+To verify the mixed C plus hand-written NASM object teaching path:
+
+```powershell
+D:\software\nasm\nasm.exe -f win64 -o .\build\test-objects\tmp_link_text_addr64_helper.obj .\input\tmp_link_text_addr64_helper.asm
+.\build\Debug\minic.exe .\input\tmp_link_text_addr64_main.c .\build\test-objects\tmp_link_text_addr64_helper.obj --link-trace -o .\build\output\tmp_link_text_addr64_manual.exe
+.\build\output\tmp_link_text_addr64_manual.exe
+$LASTEXITCODE
+```
+
+Expected exit code:
+
+```text
+42
+```
+
+To verify the Linux system-linker path through WSL:
+
+```powershell
+.\build\Debug\minic.exe .\input\answer.c --target x86_64-linux -o .\build\output\answer_linux
+wsl /mnt/d/project/cpp/demo2/build/output/answer_linux
+```
+
+Expected exit code:
+
+```text
+42
+```
+
 ## Run Tests
 
 Fastest commands:
@@ -179,7 +244,7 @@ Explicit underlying CTest command for the current phase:
 ctest --test-dir .\build -C Debug -L phase-current --output-on-failure
 ```
 
-Current regression cases are declared in [CMakeLists.txt](/E:/project/cpp/minic/CMakeLists.txt), with per-case source files, compiler arguments, expected exit codes, and trace/output checks passed into [run_regression_case.ps1](/E:/project/cpp/minic/tests/run_regression_case.ps1).
+Current regression cases are declared in [CMakeLists.txt](CMakeLists.txt), with per-case source files, compiler arguments, expected exit codes, and trace/output checks passed into [run_regression_case.ps1](tests/run_regression_case.ps1). The standalone linker smoke test uses [run_linker_regression_case.ps1](tests/run_linker_regression_case.ps1).
 
 To run a single example by test name:
 
@@ -199,14 +264,25 @@ To run only the relocation-focused regressions:
 ctest --preset relocations
 ```
 
+To run only the explicit linker-failure regressions:
+
+```powershell
+ctest --preset linker-failures
+```
+
+To run only the Linux system-linker regressions:
+
+```powershell
+ctest --preset linux-link
+```
+
 ## Notes
 
 This is intentionally a tiny compiler, not a full ISO C implementation.
 Current limits:
 
 - no general non-constant global initializers beyond function names, `&function`, `&global_object`, and string-literal pointer forms
-- no general global array initializers beyond `char[] = "..."` and the minimal function-pointer-table subset
-- no local string literal initialization
+- no general aggregate initialization beyond the currently supported one-dimensional integer/pointer array subsets
 - no structs
-- only up to 4 parameters
-- no array initializers
+- no full ISO C usual arithmetic conversions; integer compatibility follows the compiler's current teaching-oriented widening rules
+- Linux executable linking depends on a working WSL distribution with `gcc`; this is a system-linker integration, not an in-process ELF linker

@@ -1,4 +1,4 @@
-#include "Driver.h"
+#include "LinkerDriver.h"
 
 #include <exception>
 #include <iostream>
@@ -12,7 +12,7 @@ int main(int argc, char **argv) {
             args.emplace_back(argv[i]);
         }
 
-        Driver driver;
+        LinkerDriver driver;
         return driver.run(args);
     } catch (const std::exception &ex) {
         std::cerr << ex.what() << '\n';

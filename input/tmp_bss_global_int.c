@@ -1,9 +1,5 @@
-int counter;
+int values[2] = { 1, 2, 3 };
 
 int main() {
-    if (counter != 0) {
-        return 1;
-    }
-    counter = 7;
-    return counter;
+    return 0;
 }

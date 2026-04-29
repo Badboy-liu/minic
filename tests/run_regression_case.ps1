@@ -20,7 +20,17 @@ param(
 
     [string]$RequiredOutputMarkers = "",
 
+    [string]$CheckFile = "",
+
+    [string]$RequiredFileMarkers = "",
+
     [switch]$ExpectCompilerFailure,
+
+    [switch]$RunWithWsl,
+
+    [switch]$SkipIfWslUnavailable,
+
+    [switch]$SkipRun,
 
     [string]$RequiredErrorMarkers = ""
 )
@@ -42,6 +52,96 @@ function Split-List {
     return @($Value.Split(';') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 }
 
+function Find-Nasm {
+    $candidates = @(
+        "D:/software/nasm/nasm.exe",
+        "C:/Program Files/NASM/nasm.exe"
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path $candidate) {
+            return $candidate
+        }
+    }
+
+    $command = Get-Command nasm.exe -ErrorAction SilentlyContinue
+    if ($command) {
+        return $command.Source
+    }
+
+    throw "Could not find nasm.exe for assembly-backed regression case"
+}
+
+function Convert-AsmToObjectPath {
+    param(
+        [string]$AsmPath
+    )
+
+    $directory = Join-Path $RepoRoot "build/test-objects"
+    New-Item -ItemType Directory -Force -Path $directory | Out-Null
+    return Join-Path $directory ([IO.Path]::GetFileNameWithoutExtension($AsmPath) + ".obj")
+}
+
+function Assemble-InputObject {
+    param(
+        [string]$AsmPath
+    )
+
+    $nasm = Find-Nasm
+    $objPath = Convert-AsmToObjectPath $AsmPath
+    & $nasm -f win64 -o $objPath $AsmPath 2>&1 | Out-String | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to assemble regression object: $AsmPath"
+    }
+    return $objPath
+}
+
+function Find-Wsl {
+    $candidates = @(
+        "C:/Windows/System32/wsl.exe"
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path $candidate) {
+            return $candidate
+        }
+    }
+
+    $command = Get-Command wsl.exe -ErrorAction SilentlyContinue
+    if ($command) {
+        return $command.Source
+    }
+
+    return $null
+}
+
+function Convert-ToWslPath {
+    param(
+        [string]$WindowsPath
+    )
+
+    $resolved = [IO.Path]::GetFullPath($WindowsPath).Replace('\', '/')
+    if ($resolved.Length -lt 2 -or $resolved[1] -ne ':') {
+        throw "Cannot convert path to WSL form: $WindowsPath"
+    }
+    $drive = [char]::ToLowerInvariant($resolved[0])
+    return "/mnt/$drive" + $resolved.Substring(2)
+}
+
+function Test-WslGccAvailable {
+    $wsl = Find-Wsl
+    if (-not $wsl) {
+        return $false
+    }
+
+    $savedErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $wsl sh -lc "command -v gcc >/dev/null 2>&1" 2>$null | Out-Null
+        return $LASTEXITCODE -eq 0
+    } finally {
+        $ErrorActionPreference = $savedErrorActionPreference
+    }
+}
+
 function Invoke-Compiler {
     param(
         [string[]]$Arguments
@@ -50,7 +150,12 @@ function Invoke-Compiler {
     $savedErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
-        $output = & $CompilerPath @Arguments 2>&1
+        Push-Location $RepoRoot
+        try {
+            $output = & $CompilerPath @Arguments 2>&1
+        } finally {
+            Pop-Location
+        }
     } finally {
         $ErrorActionPreference = $savedErrorActionPreference
     }
@@ -69,15 +174,54 @@ function Assert-ExitCode {
         [int]$Expected
     )
 
-    & $ExePath
+    Push-Location $RepoRoot
+    try {
+        & $ExePath
+    } finally {
+        Pop-Location
+    }
     if ($LASTEXITCODE -ne $Expected) {
         throw "Expected $ExePath to return $Expected but got $LASTEXITCODE"
     }
 }
 
+function Assert-WslExitCode {
+    param(
+        [string]$ExePath,
+        [int]$Expected
+    )
+
+    $wsl = Find-Wsl
+    if (-not $wsl) {
+        throw "WSL is required to run Linux executable regression cases"
+    }
+
+    $wslPath = Convert-ToWslPath (Join-Path $RepoRoot $ExePath)
+    $savedErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $wsl $wslPath 2>&1 | Out-String | Out-Null
+    } finally {
+        $ErrorActionPreference = $savedErrorActionPreference
+    }
+    if ($LASTEXITCODE -ne $Expected) {
+        throw "Expected WSL executable $ExePath to return $Expected but got $LASTEXITCODE"
+    }
+}
+
+if ($SkipIfWslUnavailable -and -not (Test-WslGccAvailable)) {
+    Write-Output "Skipping regression case because WSL with gcc is not available on this host"
+    exit 0
+}
+
 $compilerInvocation = @()
 foreach ($source in (Split-List $SourceFiles)) {
-    $compilerInvocation += (Join-Path $RepoRoot $source)
+    $resolvedPath = Join-Path $RepoRoot $source
+    if ([IO.Path]::GetExtension($resolvedPath) -eq ".asm") {
+        $compilerInvocation += (Assemble-InputObject $resolvedPath)
+    } else {
+        $compilerInvocation += $resolvedPath
+    }
 }
 foreach ($argument in (Split-List $CompilerArgs)) {
     if ($argument.StartsWith("REPO:")) {
@@ -107,8 +251,29 @@ foreach ($marker in (Split-List $RequiredErrorMarkers)) {
     }
 }
 
+if (-not [string]::IsNullOrWhiteSpace($CheckFile)) {
+    $resolvedCheckFile = Join-Path $RepoRoot $CheckFile
+    if (-not (Test-Path $resolvedCheckFile)) {
+        throw "Expected file to exist for marker checks: $resolvedCheckFile"
+    }
+    $fileContents = Get-Content -Path $resolvedCheckFile -Raw
+    foreach ($marker in (Split-List $RequiredFileMarkers)) {
+        if (-not $fileContents.Contains($marker)) {
+            throw "Missing required file marker '$marker' in $resolvedCheckFile"
+        }
+    }
+}
+
 if ($ExpectCompilerFailure) {
     exit 0
 }
 
-Assert-ExitCode (Join-Path $RepoRoot $OutputExe) $ExpectedExit
+if ($SkipRun) {
+    exit 0
+}
+
+if ($RunWithWsl) {
+    Assert-WslExitCode $OutputExe $ExpectedExit
+} else {
+    Assert-ExitCode (Join-Path $RepoRoot $OutputExe) $ExpectedExit
+}

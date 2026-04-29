@@ -23,7 +23,7 @@ Validate that uninitialized global storage is emitted into `.bss`, linked correc
 - Root cause:
   NASM COFF `REL32` relocations against `.bss` used the section symbol plus an inline addend, but the built-in PE linker discarded that addend during relocation.
 - Fix status:
-  Fixed in [src/PeLinker.cpp](/E:/project/cpp/minic/src/PeLinker.cpp) by preserving the original signed relocation addend when computing the final relative displacement.
+Fixed in [src/PeLinker.cpp](../../../src/PeLinker.cpp) by preserving the original signed relocation addend when computing the final relative displacement.
 
 ## Validation Artifacts
 

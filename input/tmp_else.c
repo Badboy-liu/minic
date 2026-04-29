@@ -1,8 +1,5 @@
+int values[4] = { 10, 20, 12 };
+
 int main() {
-    int x = 0;
-    if (x) {
-        return 1;
-    } else {
-        return 7;
-    }
+    return values[0] + values[1] + values[2] + values[3];
 }
