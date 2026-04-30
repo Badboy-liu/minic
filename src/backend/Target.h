@@ -18,6 +18,11 @@ enum class RuntimeEntryFlavor {
     LinuxSyscall
 };
 
+enum class WindowsObjectBackend {
+    Nasm,
+    Coff
+};
+
 enum class TargetKind {
     WindowsX64,
     LinuxX64
@@ -83,4 +88,24 @@ inline TargetKind parseTargetName(const std::string &name) {
         return TargetKind::LinuxX64;
     }
     throw std::runtime_error("unknown target: " + name);
+}
+
+inline const char *windowsObjectBackendName(WindowsObjectBackend backend) {
+    switch (backend) {
+    case WindowsObjectBackend::Nasm:
+        return "nasm";
+    case WindowsObjectBackend::Coff:
+        return "coff";
+    }
+    return "nasm";
+}
+
+inline WindowsObjectBackend parseWindowsObjectBackend(const std::string &name) {
+    if (name == "nasm") {
+        return WindowsObjectBackend::Nasm;
+    }
+    if (name == "coff") {
+        return WindowsObjectBackend::Coff;
+    }
+    throw std::runtime_error("unknown windows object backend: " + name);
 }

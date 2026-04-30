@@ -7,8 +7,8 @@ It implements the pipeline in clear stages:
 - Lexing: convert source text into tokens
 - Parsing: build an AST for a small C subset
 - Semantic analysis: resolve locals, reject undeclared or duplicate variables, compute stack layout
-- Code generation: emit Windows x64 NASM assembly
-- Linking: invoke `nasm` to produce an object, then hand final linking to the standalone `minic-link` driver
+- Code generation: emit Windows x64 NASM assembly or a teaching-subset direct COFF object
+- Linking: assemble with `nasm` when using the NASM backend, then hand final linking to the standalone `minic-link` driver
 
 ## Documentation
 
@@ -29,7 +29,8 @@ Document types:
 
 The current compiler supports:
 
-- multiple `char` / `short` / `int` / `long` / `long long` / `void` functions
+- multiple `_Bool` / `char` / `short` / `int` / `long` / `long long` / `float` / `double` / `void` functions
+- `signed` / `unsigned` integer type spellings across `char` / `short` / `int` / `long` / `long long`
 - function declarations and later definitions
 - external function declarations resolved either from other input objects or the built-in import map
 - global integer variables
@@ -42,7 +43,9 @@ The current compiler supports:
 - tentative global definitions emitted via `.bss`
 - `void` functions
 - integer and pointer parameters, including Windows x64 stack-passed arguments beyond the first four
-- mixed integer-type arithmetic, assignment, argument passing, and `return` conversion across `char` / `short` / `int` / `long` / `long long`
+- `float` / `double` parameters and returns through the current teaching subset of x64 XMM calling convention support
+- mixed integer-type arithmetic, assignment, argument passing, and `return` conversion across `_Bool` / signed integer / unsigned integer variants of `char` / `short` / `int` / `long` / `long long`
+- floating-point literals and same-family `float` / `double` arithmetic, comparison, assignment, and function calls
 - pointer parameters and locals
 - local arrays of non-void element types
 - local integer arrays with initializer lists
@@ -120,6 +123,14 @@ Or invoke the linker directly once objects already exist:
 ```
 
 Each input file is compiled into its own NASM assembly file and object file. The built-in PE linker then resolves external function symbols across those objects, so functions defined in one `.c` file can be called from another `.c` file.
+
+On Windows, the experimental direct object path is also available:
+
+```powershell
+.\build\Debug\minic.exe .\input\answer.c --windows-obj-backend coff -o .\build\output\answer_direct_coff.exe
+```
+
+That path already covers a useful teaching subset, including multi-file integer code, stack-passed integer arguments, simple globals in `.data` / `.bss`, global pointer initializers, and basic imported calls like `puts`. It does **not** fully replace `nasm` yet: some existing Windows features still only work through the NASM backend, and Linux still uses the NASM/ELF path today.
 
 Global variables are emitted into `.data` when initialized and `.bss` when they are uninitialized/tentative definitions. The built-in PE linker preserves section-relative offsets for NASM COFF `REL32` relocations, so multiple globals placed in `.bss` keep distinct addresses in the final executable. It also supports the current compiler's minimal `.data` `ADDR64` relocation path for global pointer initializers such as `int *p = &x;`, `char *p = "A";`, `int (*fn_ptr)() = answer;`, and `int (*fn_table[2])() = { one, two };`. It now also supports the current teaching subset of `.text` `ADDR64` relocations, which makes small hand-written NASM helper objects linkable on the Windows path. For supported absolute-address sites, the linker now also synthesizes a PE `.reloc` section with `DIR64` base relocations, so those executables remain correct after rebasing instead of relying on a fixed preferred image base.
 
@@ -304,5 +315,6 @@ Current limits:
 - no general non-constant global initializers beyond function names, `&function`, `&global_object`, and string-literal pointer forms
 - no general aggregate initialization beyond the currently supported one-dimensional integer/pointer array subsets
 - no structs
+- no full mixed integer/floating implicit conversion support yet
 - no full ISO C usual arithmetic conversions; integer compatibility follows the compiler's current teaching-oriented widening rules
 - Linux executable linking depends on a working WSL distribution with `gcc`; this is a system-linker integration, not an in-process ELF linker

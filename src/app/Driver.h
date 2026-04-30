@@ -16,6 +16,7 @@ private:
         std::filesystem::path outputPath;
         std::filesystem::path asmPath;
         TargetKind target = TargetKind::WindowsX64;
+        WindowsObjectBackend windowsObjectBackend = WindowsObjectBackend::Nasm;
         bool asmPathExplicit = false;
         bool assemblyOnly = false;
         bool compileOnly = false;
@@ -28,5 +29,6 @@ private:
     static bool isObjectInput(const std::filesystem::path &path);
     static std::string readFile(const std::filesystem::path &path);
     static void writeFile(const std::filesystem::path &path, const std::string &content);
+    static void writeBinaryFile(const std::filesystem::path &path, const std::vector<std::uint8_t> &content);
     static std::string usage();
 };

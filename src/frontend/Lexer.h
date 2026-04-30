@@ -19,7 +19,7 @@ private:
     char advance();
     bool match(char expected);
     void skipWhitespaceAndComments();
-    Token makeToken(TokenKind kind, std::string lexeme, int value = 0) const;
+    Token makeToken(TokenKind kind, std::string lexeme, int value = 0, double doubleValue = 0.0) const;
     Token lexNumber();
     Token lexStringLiteral();
     Token lexIdentifierOrKeyword();

@@ -1,10 +1,12 @@
 #include "Driver.h"
 
 #include "CodeGenerator.h"
+#include "CoffObjectWriter.h"
 #include "Lexer.h"
 #include "Parser.h"
 #include "Semantics.h"
 #include "Toolchain.h"
+#include "WindowsObjectEmitter.h"
 
 #include <filesystem>
 #include <fstream>
@@ -75,6 +77,7 @@ int Driver::run(const fs::path &selfPath, const std::vector<std::string> &args) 
     }
 
     CodeGenerator generator(options.target);
+    WindowsObjectEmitter windowsObjectEmitter;
     const fs::path outputDirectory = options.outputPath.parent_path().empty()
         ? fs::path(".")
         : options.outputPath.parent_path();
@@ -151,6 +154,23 @@ int Driver::run(const fs::path &selfPath, const std::vector<std::string> &args) 
             ? options.outputPath
             : outputDirectory / (stem.string() + objectExtension);
 
+        const bool useWindowsCoffBackend =
+            options.target == TargetKind::WindowsX64 &&
+            options.windowsObjectBackend == WindowsObjectBackend::Coff;
+
+        if (useWindowsCoffBackend) {
+            if (options.assemblyOnly) {
+                throw std::runtime_error("assembly-only output is not supported with --windows-obj-backend coff");
+            }
+
+            const ObjectFileModel model = windowsObjectEmitter.emit(fileProgram, emitEntryPoint);
+            writeBinaryFile(objPath, CoffObjectWriter::writeAmd64(model));
+            objPaths.push_back(objPath);
+            generatedObjPaths.push_back(objPath);
+            std::cout << "Generated object: " << objPath.string() << '\n';
+            continue;
+        }
+
         const std::string assembly = generator.generate(fileProgram, emitEntryPoint);
         writeFile(asmPath, assembly);
         std::cout << "Generated assembly: " << asmPath.string() << '\n';
@@ -226,6 +246,11 @@ Driver::Options Driver::parseOptions(const std::vector<std::string> &args) const
                 throw std::runtime_error("missing target name after --target");
             }
             options.target = parseTargetName(args[++i]);
+        } else if (args[i] == "--windows-obj-backend") {
+            if (i + 1 >= args.size()) {
+                throw std::runtime_error("missing backend name after --windows-obj-backend");
+            }
+            options.windowsObjectBackend = parseWindowsObjectBackend(args[++i]);
         } else {
             options.inputPaths.push_back(args[i]);
         }
@@ -298,6 +323,18 @@ void Driver::writeFile(const fs::path &path, const std::string &content) {
     out << content;
 }
 
+void Driver::writeBinaryFile(const fs::path &path, const std::vector<std::uint8_t> &content) {
+    if (!path.parent_path().empty()) {
+        fs::create_directories(path.parent_path());
+    }
+
+    std::ofstream out(path, std::ios::binary);
+    if (!out) {
+        throw std::runtime_error("failed to write file: " + path.string());
+    }
+    out.write(reinterpret_cast<const char *>(content.data()), static_cast<std::streamsize>(content.size()));
+}
+
 std::string Driver::usage() {
-    return "Usage: minic <input.c>... [--target x86_64-windows|x86_64-linux] [-S] [-c] [-o output] [--emit-asm output.asm] [--keep-obj] [--link-trace]";
+    return "Usage: minic <input.c>... [--target x86_64-windows|x86_64-linux] [--windows-obj-backend nasm|coff] [-S] [-c] [-o output] [--emit-asm output.asm] [--keep-obj] [--link-trace]";
 }

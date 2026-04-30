@@ -25,6 +25,7 @@ private:
     GlobalVar parseGlobalVariable(TypePtr declaredType, std::string name, bool isExternStorage);
     TypePtr parseType();
     TypePtr parseBaseType();
+    TypePtr parseNumericType(bool sawSigned, bool sawUnsigned);
     TypePtr parseTypeSuffix(TypePtr baseType);
     ParsedDeclarator parseVariableDeclarator(TypePtr declaredType);
     std::vector<TypePtr> parseFunctionTypeParameters();

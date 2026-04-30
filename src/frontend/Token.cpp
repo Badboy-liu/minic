@@ -8,8 +8,12 @@ const char *tokenKindName(TokenKind kind) {
         return "identifier";
     case TokenKind::Number:
         return "number";
+    case TokenKind::FloatLiteral:
+        return "float literal";
     case TokenKind::StringLiteral:
         return "string literal";
+    case TokenKind::KeywordBool:
+        return "_Bool";
     case TokenKind::KeywordChar:
         return "char";
     case TokenKind::KeywordShort:
@@ -18,8 +22,16 @@ const char *tokenKindName(TokenKind kind) {
         return "int";
     case TokenKind::KeywordLong:
         return "long";
+    case TokenKind::KeywordFloat:
+        return "float";
+    case TokenKind::KeywordDouble:
+        return "double";
     case TokenKind::KeywordVoid:
         return "void";
+    case TokenKind::KeywordSigned:
+        return "signed";
+    case TokenKind::KeywordUnsigned:
+        return "unsigned";
     case TokenKind::KeywordExtern:
         return "extern";
     case TokenKind::KeywordReturn:

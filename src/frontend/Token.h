@@ -6,12 +6,18 @@ enum class TokenKind {
     EndOfFile,
     Identifier,
     Number,
+    FloatLiteral,
     StringLiteral,
+    KeywordBool,
     KeywordChar,
     KeywordShort,
     KeywordInt,
     KeywordLong,
+    KeywordFloat,
+    KeywordDouble,
     KeywordVoid,
+    KeywordSigned,
+    KeywordUnsigned,
     KeywordExtern,
     KeywordReturn,
     KeywordIf,
@@ -49,6 +55,7 @@ struct Token {
     TokenKind kind;
     std::string lexeme;
     int intValue;
+    double doubleValue;
     std::string stringValue;
     int line;
     int column;

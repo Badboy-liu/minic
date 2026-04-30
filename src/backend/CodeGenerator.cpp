@@ -1,5 +1,6 @@
 #include "CodeGenerator.h"
 
+#include <cstring>
 #include <iomanip>
 #include <sstream>
 #include <unordered_set>
@@ -19,6 +20,8 @@ std::string CodeGenerator::generate(const Program &program, bool emitEntryPointV
     bssLines.clear();
     rdataLines.clear();
     stringLabels.clear();
+    float64Labels.clear();
+    float32Labels.clear();
     labelCounter = 0;
     loopContinueLabels.clear();
     loopBreakLabels.clear();
@@ -265,6 +268,7 @@ void CodeGenerator::emitTargetEntryBody() {
 
 void CodeGenerator::emitFunction(const Function &function) {
     currentReturnLabel = makeLabel(function.name + "_return");
+    currentFunctionReturnType = function.returnType;
     const std::string symbol = functionSymbol(function.name);
     const int registerCount = argumentRegisterCount();
 
@@ -278,7 +282,9 @@ void CodeGenerator::emitFunction(const Function &function) {
         const Type &type = *function.parameters[i].type;
         const std::string localAddress = "[rbp-" + std::to_string(function.parameters[i].stackOffset) + "]";
         if (i < registerCount) {
-            if (type.valueSize() == 1) {
+            if (type.isFloating()) {
+                emitLine(std::string("    mov") + (type.kind == TypeKind::Float ? "ss " : "sd ") + localAddress + ", xmm" + std::to_string(i));
+            } else if (type.valueSize() == 1) {
                 emitLine("    mov byte " + localAddress + ", " + argumentRegister(i).r8);
             } else if (type.valueSize() == 2) {
                 emitLine("    mov word " + localAddress + ", " + argumentRegister(i).r16);
@@ -289,7 +295,10 @@ void CodeGenerator::emitFunction(const Function &function) {
             }
         } else {
             const std::string sourceAddress = "[rbp+" + std::to_string(stackArgumentOffset(i)) + "]";
-            if (type.valueSize() == 1) {
+            if (type.isFloating()) {
+                emitLine(std::string("    mov") + (type.kind == TypeKind::Float ? "ss xmm0, " : "sd xmm0, ") + sourceAddress);
+                emitLine(std::string("    mov") + (type.kind == TypeKind::Float ? "ss " : "sd ") + localAddress + ", xmm0");
+            } else if (type.valueSize() == 1) {
                 emitLine("    mov al, byte " + sourceAddress);
                 emitLine("    mov byte " + localAddress + ", al");
             } else if (type.valueSize() == 2) {
@@ -302,6 +311,11 @@ void CodeGenerator::emitFunction(const Function &function) {
                 emitLine("    mov rax, qword " + sourceAddress);
                 emitLine("    mov qword " + localAddress + ", rax");
             }
+        }
+        if (type.kind == TypeKind::Bool) {
+            emitLine("    cmp byte " + localAddress + ", 0");
+            emitLine("    setne al");
+            emitLine("    mov byte " + localAddress + ", al");
         }
     }
 
@@ -324,6 +338,8 @@ void CodeGenerator::emitStatement(const Stmt &stmt) {
         const auto &returnStmt = static_cast<const ReturnStmt &>(stmt);
         if (returnStmt.expr) {
             emitExpr(*returnStmt.expr);
+            emitValueConversion(*returnStmt.expr->type, *currentFunctionReturnType);
+            emitBoolNormalize(*currentFunctionReturnType);
         }
         emitLine("    jmp " + currentReturnLabel);
         break;
@@ -344,6 +360,7 @@ void CodeGenerator::emitStatement(const Stmt &stmt) {
                 emitLine("    push rax");
                 emitExpr(*decl.init);
                 emitLine("    pop rcx");
+                emitValueConversion(*decl.init->type, *decl.type);
                 emitStore(*decl.type);
             }
         }
@@ -362,8 +379,7 @@ void CodeGenerator::emitStatement(const Stmt &stmt) {
         const std::string endLabel = makeLabel("if_end");
 
         emitExpr(*ifStmt.condition);
-        emitLine("    cmp rax, 0");
-        emitLine("    je " + elseLabel);
+        emitZeroComparison(*ifStmt.condition->type, elseLabel, true);
         emitStatement(*ifStmt.thenBranch);
         emitLine("    jmp " + endLabel);
         emitLine(elseLabel + ":");
@@ -382,8 +398,7 @@ void CodeGenerator::emitStatement(const Stmt &stmt) {
         loopBreakLabels.push_back(endLabel);
         emitLine(loopLabel + ":");
         emitExpr(*whileStmt.condition);
-        emitLine("    cmp rax, 0");
-        emitLine("    je " + endLabel);
+        emitZeroComparison(*whileStmt.condition->type, endLabel, true);
         emitStatement(*whileStmt.body);
         emitLine("    jmp " + loopLabel);
         emitLine(endLabel + ":");
@@ -405,8 +420,7 @@ void CodeGenerator::emitStatement(const Stmt &stmt) {
         emitLine(conditionLabel + ":");
         if (forStmt.condition) {
             emitExpr(*forStmt.condition);
-            emitLine("    cmp rax, 0");
-            emitLine("    je " + endLabel);
+            emitZeroComparison(*forStmt.condition->type, endLabel, true);
         }
         emitStatement(*forStmt.body);
         emitLine(updateLabel + ":");
@@ -433,6 +447,12 @@ void CodeGenerator::emitExpr(const Expr &expr) {
     case Expr::Kind::Number:
         emitLine("    mov eax, " + std::to_string(static_cast<const NumberExpr &>(expr).value));
         return;
+    case Expr::Kind::FloatNumber: {
+        const auto &floatExpr = static_cast<const FloatExpr &>(expr);
+        const std::string label = floatLiteralLabel(floatExpr.value, expr.type->kind == TypeKind::Float);
+        emitLine(std::string("    mov") + (expr.type->kind == TypeKind::Float ? "ss" : "sd") + " xmm0, [rel " + label + "]");
+        return;
+    }
     case Expr::Kind::String: {
         const auto &stringExpr = static_cast<const StringExpr &>(expr);
         emitLine("    lea rax, [rel " + stringLabel(stringExpr.value) + "]");
@@ -453,7 +473,17 @@ void CodeGenerator::emitExpr(const Expr &expr) {
             return;
         case UnaryOp::Minus:
             emitExpr(*unary.operand);
-            if (expr.type->valueSize() > 4) {
+            if (expr.type->isFloating()) {
+                if (expr.type->kind == TypeKind::Float) {
+                    emitLine("    xorps xmm1, xmm1");
+                    emitLine("    subss xmm1, xmm0");
+                    emitLine("    movaps xmm0, xmm1");
+                } else {
+                    emitLine("    xorpd xmm1, xmm1");
+                    emitLine("    subsd xmm1, xmm0");
+                    emitLine("    movapd xmm0, xmm1");
+                }
+            } else if (expr.type->valueSize() > 4) {
                 emitLine("    neg rax");
             } else {
                 emitLine("    neg eax");
@@ -461,9 +491,21 @@ void CodeGenerator::emitExpr(const Expr &expr) {
             return;
         case UnaryOp::LogicalNot:
             emitExpr(*unary.operand);
-            emitLine("    cmp rax, 0");
-            emitLine("    sete al");
-            emitLine("    movzx eax, al");
+            if (unary.operand->type->isFloating()) {
+                if (unary.operand->type->kind == TypeKind::Float) {
+                    emitLine("    xorps xmm1, xmm1");
+                    emitLine("    ucomiss xmm0, xmm1");
+                } else {
+                    emitLine("    xorpd xmm1, xmm1");
+                    emitLine("    ucomisd xmm0, xmm1");
+                }
+                emitLine("    sete al");
+                emitLine("    movzx eax, al");
+            } else {
+                emitLine("    cmp rax, 0");
+                emitLine("    sete al");
+                emitLine("    movzx eax, al");
+            }
             return;
         case UnaryOp::AddressOf:
             emitAddress(*unary.operand);
@@ -484,6 +526,7 @@ void CodeGenerator::emitExpr(const Expr &expr) {
         emitLine("    push rax");
         emitExpr(*assign.value);
         emitLine("    pop rcx");
+        emitValueConversion(*assign.value->type, *assign.target->type);
         emitStore(*assign.target->type);
         return;
     }
@@ -505,11 +548,9 @@ void CodeGenerator::emitExpr(const Expr &expr) {
             const std::string falseLabel = makeLabel("and_false");
             const std::string endLabel = makeLabel("and_end");
             emitExpr(*binary.left);
-            emitLine("    cmp rax, 0");
-            emitLine("    je " + falseLabel);
+            emitZeroComparison(*binary.left->type, falseLabel, true);
             emitExpr(*binary.right);
-            emitLine("    cmp rax, 0");
-            emitLine("    je " + falseLabel);
+            emitZeroComparison(*binary.right->type, falseLabel, true);
             emitLine("    mov eax, 1");
             emitLine("    jmp " + endLabel);
             emitLine(falseLabel + ":");
@@ -521,16 +562,21 @@ void CodeGenerator::emitExpr(const Expr &expr) {
             const std::string trueLabel = makeLabel("or_true");
             const std::string endLabel = makeLabel("or_end");
             emitExpr(*binary.left);
-            emitLine("    cmp rax, 0");
-            emitLine("    jne " + trueLabel);
+            emitZeroComparison(*binary.left->type, trueLabel, false);
             emitExpr(*binary.right);
-            emitLine("    cmp rax, 0");
-            emitLine("    jne " + trueLabel);
+            emitZeroComparison(*binary.right->type, trueLabel, false);
             emitLine("    xor eax, eax");
             emitLine("    jmp " + endLabel);
             emitLine(trueLabel + ":");
             emitLine("    mov eax, 1");
             emitLine(endLabel + ":");
+            return;
+        }
+
+        const bool usesFloatingBinaryPath =
+            binary.left->type->decay()->isFloating() || binary.right->type->decay()->isFloating();
+        if (usesFloatingBinaryPath) {
+            emitFloatBinaryOp(binary, *expr.type);
             return;
         }
 
@@ -576,11 +622,21 @@ void CodeGenerator::emitExpr(const Expr &expr) {
             return;
         case BinaryOp::Divide:
             if (expr.type->valueSize() > 4) {
-                emitLine("    cqo");
-                emitLine("    idiv rcx");
+                if (useUnsignedIntegerOps(*expr.type)) {
+                    emitLine("    xor edx, edx");
+                    emitLine("    div rcx");
+                } else {
+                    emitLine("    cqo");
+                    emitLine("    idiv rcx");
+                }
             } else {
-                emitLine("    cdq");
-                emitLine("    idiv ecx");
+                if (useUnsignedIntegerOps(*expr.type)) {
+                    emitLine("    xor edx, edx");
+                    emitLine("    div ecx");
+                } else {
+                    emitLine("    cdq");
+                    emitLine("    idiv ecx");
+                }
             }
             return;
         case BinaryOp::Equal:
@@ -607,7 +663,7 @@ void CodeGenerator::emitExpr(const Expr &expr) {
             } else {
                 emitLine("    cmp eax, ecx");
             }
-            emitLine("    setl al");
+            emitLine(std::string("    ") + (useUnsignedComparison(binary) ? "setb" : "setl") + " al");
             emitLine("    movzx eax, al");
             return;
         case BinaryOp::LessEqual:
@@ -616,7 +672,7 @@ void CodeGenerator::emitExpr(const Expr &expr) {
             } else {
                 emitLine("    cmp eax, ecx");
             }
-            emitLine("    setle al");
+            emitLine(std::string("    ") + (useUnsignedComparison(binary) ? "setbe" : "setle") + " al");
             emitLine("    movzx eax, al");
             return;
         case BinaryOp::Greater:
@@ -625,7 +681,7 @@ void CodeGenerator::emitExpr(const Expr &expr) {
             } else {
                 emitLine("    cmp eax, ecx");
             }
-            emitLine("    setg al");
+            emitLine(std::string("    ") + (useUnsignedComparison(binary) ? "seta" : "setg") + " al");
             emitLine("    movzx eax, al");
             return;
         case BinaryOp::GreaterEqual:
@@ -634,7 +690,7 @@ void CodeGenerator::emitExpr(const Expr &expr) {
             } else {
                 emitLine("    cmp eax, ecx");
             }
-            emitLine("    setge al");
+            emitLine(std::string("    ") + (useUnsignedComparison(binary) ? "setae" : "setge") + " al");
             emitLine("    movzx eax, al");
             return;
         case BinaryOp::LogicalAnd:
@@ -683,6 +739,23 @@ void CodeGenerator::emitAddress(const Expr &expr) {
     }
 }
 
+void CodeGenerator::emitZeroComparison(const Type &type, const std::string &label, bool jumpWhenZero) {
+    if (type.isFloating()) {
+        if (type.kind == TypeKind::Float) {
+            emitLine("    xorps xmm1, xmm1");
+            emitLine("    ucomiss xmm0, xmm1");
+        } else {
+            emitLine("    xorpd xmm1, xmm1");
+            emitLine("    ucomisd xmm0, xmm1");
+        }
+        emitLine(std::string("    ") + (jumpWhenZero ? "je " : "jne ") + label);
+        return;
+    }
+
+    emitLine("    cmp rax, 0");
+    emitLine(std::string("    ") + (jumpWhenZero ? "je " : "jne ") + label);
+}
+
 std::string CodeGenerator::globalAddressInitializer(const Expr &expr) {
     if (expr.kind == Expr::Kind::String) {
         const auto &stringExpr = static_cast<const StringExpr &>(expr);
@@ -711,10 +784,19 @@ void CodeGenerator::emitWindowsCallExpr(const CallExpr &call) {
     emitLine("    sub rsp, " + std::to_string(alignedSlotCount * 8));
     for (int i = static_cast<int>(call.arguments.size()) - 1; i >= 0; --i) {
         emitExpr(*call.arguments[i]);
-        emitLine("    mov qword [rsp+" + std::to_string(i * 8) + "], rax");
+        emitValueConversion(*call.arguments[i]->type, *call.parameterTypes[i]);
+        if (call.parameterTypes[i]->isFloating()) {
+            emitLine(std::string("    mov") + (call.parameterTypes[i]->kind == TypeKind::Float ? "ss" : "sd") +
+                     " [rsp+" + std::to_string(i * 8) + "], xmm0");
+        } else {
+            emitLine("    mov qword [rsp+" + std::to_string(i * 8) + "], rax");
+        }
     }
     for (int i = 0; i < std::min<int>(registerCount, static_cast<int>(call.arguments.size())); ++i) {
-        if (call.parameterTypes[i]->valueSize() <= 4) {
+        if (call.parameterTypes[i]->isFloating()) {
+            emitLine(std::string("    mov") + (call.parameterTypes[i]->kind == TypeKind::Float ? "ss" : "sd") +
+                     " xmm" + std::to_string(i) + ", [rsp+" + std::to_string(i * 8) + "]");
+        } else if (call.parameterTypes[i]->valueSize() <= 4) {
             emitLine("    mov " + std::string(argumentRegister(i).r32) +
                      ", dword [rsp+" + std::to_string(i * 8) + "]");
         } else {
@@ -739,11 +821,20 @@ void CodeGenerator::emitSystemVCallExpr(const CallExpr &call) {
     }
     for (int i = static_cast<int>(call.arguments.size()) - 1; i >= 0; --i) {
         emitExpr(*call.arguments[i]);
+        emitValueConversion(*call.arguments[i]->type, *call.parameterTypes[i]);
         const int slotIndex = i < registerCount ? stackArgumentCount + i : i - registerCount;
-        emitLine("    mov qword [rsp+" + std::to_string(slotIndex * 8) + "], rax");
+        if (call.parameterTypes[i]->isFloating()) {
+            emitLine(std::string("    mov") + (call.parameterTypes[i]->kind == TypeKind::Float ? "ss" : "sd") +
+                     " [rsp+" + std::to_string(slotIndex * 8) + "], xmm0");
+        } else {
+            emitLine("    mov qword [rsp+" + std::to_string(slotIndex * 8) + "], rax");
+        }
     }
     for (int i = 0; i < temporaryRegisterSlots; ++i) {
-        if (call.parameterTypes[i]->valueSize() <= 4) {
+        if (call.parameterTypes[i]->isFloating()) {
+            emitLine(std::string("    mov") + (call.parameterTypes[i]->kind == TypeKind::Float ? "ss" : "sd") +
+                     " xmm" + std::to_string(i) + ", [rsp+" + std::to_string((stackArgumentCount + i) * 8) + "]");
+        } else if (call.parameterTypes[i]->valueSize() <= 4) {
             emitLine("    mov " + std::string(argumentRegister(i).r32) +
                      ", dword [rsp+" + std::to_string((stackArgumentCount + i) * 8) + "]");
         } else {
@@ -777,24 +868,113 @@ void CodeGenerator::emitLocalArrayInitializer(const DeclStmt &decl, const Initia
     for (std::size_t i = 0; i < list.elements.size(); ++i) {
         const int elementOffset = static_cast<int>(i) * elementSize;
         emitExpr(*list.elements[i]);
+        emitValueConversion(*list.elements[i]->type, *decl.type->elementType);
         emitStoreToLocalSlot(*decl.type->elementType, decl.stackOffset - elementOffset);
     }
     emitZeroLocalArrayElements(*decl.type, decl.stackOffset, list.elements.size());
+}
+
+void CodeGenerator::emitFloatBinaryOp(const BinaryExpr &binary, const Type &type) {
+    TypePtr computedOperandType;
+    const Type *operandType = &type;
+    if (!operandType->isFloating()) {
+        const TypePtr leftType = binary.left->type->decay();
+        const TypePtr rightType = binary.right->type->decay();
+        computedOperandType =
+            (leftType->kind == TypeKind::Double || rightType->kind == TypeKind::Double)
+            ? Type::makeDouble()
+            : Type::makeFloat();
+        operandType = computedOperandType.get();
+    }
+
+    emitExpr(*binary.left);
+    emitValueConversion(*binary.left->type, *operandType);
+    emitPushFloatValue(*operandType);
+    emitExpr(*binary.right);
+    emitValueConversion(*binary.right->type, *operandType);
+    emitLine(operandType->kind == TypeKind::Float ? "    movaps xmm1, xmm0" : "    movapd xmm1, xmm0");
+    emitPopFloatValue(*operandType, "xmm0");
+
+    switch (binary.op) {
+    case BinaryOp::Add:
+        emitLine(operandType->kind == TypeKind::Float ? "    addss xmm0, xmm1" : "    addsd xmm0, xmm1");
+        return;
+    case BinaryOp::Subtract:
+        emitLine(operandType->kind == TypeKind::Float ? "    subss xmm0, xmm1" : "    subsd xmm0, xmm1");
+        return;
+    case BinaryOp::Multiply:
+        emitLine(operandType->kind == TypeKind::Float ? "    mulss xmm0, xmm1" : "    mulsd xmm0, xmm1");
+        return;
+    case BinaryOp::Divide:
+        emitLine(operandType->kind == TypeKind::Float ? "    divss xmm0, xmm1" : "    divsd xmm0, xmm1");
+        return;
+    case BinaryOp::Equal:
+    case BinaryOp::NotEqual:
+    case BinaryOp::Less:
+    case BinaryOp::LessEqual:
+    case BinaryOp::Greater:
+    case BinaryOp::GreaterEqual:
+        emitLine(operandType->kind == TypeKind::Float ? "    ucomiss xmm0, xmm1" : "    ucomisd xmm0, xmm1");
+        switch (binary.op) {
+        case BinaryOp::Equal:
+            emitLine("    sete al");
+            break;
+        case BinaryOp::NotEqual:
+            emitLine("    setne al");
+            break;
+        case BinaryOp::Less:
+            emitLine("    setb al");
+            break;
+        case BinaryOp::LessEqual:
+            emitLine("    setbe al");
+            break;
+        case BinaryOp::Greater:
+            emitLine("    seta al");
+            break;
+        case BinaryOp::GreaterEqual:
+            emitLine("    setae al");
+            break;
+        default:
+            break;
+        }
+        emitLine("    movzx eax, al");
+        return;
+    case BinaryOp::LogicalAnd:
+    case BinaryOp::LogicalOr:
+        break;
+    }
+}
+
+void CodeGenerator::emitPushFloatValue(const Type &type) {
+    emitLine("    sub rsp, 8");
+    emitLine(std::string("    mov") + (type.kind == TypeKind::Float ? "ss " : "sd ") + "[rsp], xmm0");
+}
+
+void CodeGenerator::emitPopFloatValue(const Type &type, const char *targetRegister) {
+    emitLine(std::string("    mov") + (type.kind == TypeKind::Float ? "ss " : "sd ") + targetRegister + ", [rsp]");
+    emitLine("    add rsp, 8");
 }
 
 void CodeGenerator::emitZeroLocalArrayElements(const Type &arrayType, int baseOffset, std::size_t startIndex) {
     const int elementSize = arrayType.elementType->valueSize();
     for (std::size_t i = startIndex; i < static_cast<std::size_t>(arrayType.arrayLength); ++i) {
         const int addressOffset = baseOffset - static_cast<int>(i) * elementSize;
-        emitLine("    xor eax, eax");
-        emitLine("    xor edx, edx");
+        if (arrayType.elementType->isFloating()) {
+            emitLine(arrayType.elementType->kind == TypeKind::Float ? "    xorps xmm0, xmm0" : "    xorpd xmm0, xmm0");
+        } else {
+            emitLine("    xor eax, eax");
+            emitLine("    xor edx, edx");
+        }
         emitStoreToLocalSlot(*arrayType.elementType, addressOffset);
     }
 }
 
 void CodeGenerator::emitStoreToLocalSlot(const Type &type, int addressOffset) {
+    emitBoolNormalize(type);
     const std::string address = "[rbp-" + std::to_string(addressOffset) + "]";
-    if (type.valueSize() == 1) {
+    if (type.isFloating()) {
+        emitLine(std::string("    mov") + (type.kind == TypeKind::Float ? "ss " : "sd ") + address + ", xmm0");
+    } else if (type.valueSize() == 1) {
         emitLine("    mov byte " + address + ", al");
     } else if (type.valueSize() == 2) {
         emitLine("    mov word " + address + ", ax");
@@ -805,11 +985,32 @@ void CodeGenerator::emitStoreToLocalSlot(const Type &type, int addressOffset) {
     }
 }
 
+void CodeGenerator::emitBoolNormalize(const Type &type) {
+    if (type.kind != TypeKind::Bool) {
+        return;
+    }
+    emitLine("    cmp rax, 0");
+    emitLine("    setne al");
+    emitLine("    movzx eax, al");
+}
+
 void CodeGenerator::emitLoad(const Type &type) {
-    if (type.valueSize() == 1) {
-        emitLine("    movsx eax, byte [rax]");
+    if (type.kind == TypeKind::Bool) {
+        emitLine("    movzx eax, byte [rax]");
+    } else if (type.isFloating()) {
+        emitLine(std::string("    mov") + (type.kind == TypeKind::Float ? "ss" : "sd") + " xmm0, [rax]");
+    } else if (type.valueSize() == 1) {
+        if (type.isUnsignedInteger()) {
+            emitLine("    movzx eax, byte [rax]");
+        } else {
+            emitLine("    movsx eax, byte [rax]");
+        }
     } else if (type.valueSize() == 2) {
-        emitLine("    movsx eax, word [rax]");
+        if (type.isUnsignedInteger()) {
+            emitLine("    movzx eax, word [rax]");
+        } else {
+            emitLine("    movsx eax, word [rax]");
+        }
     } else if (type.valueSize() <= 4) {
         emitLine("    mov eax, dword [rax]");
     } else {
@@ -818,7 +1019,10 @@ void CodeGenerator::emitLoad(const Type &type) {
 }
 
 void CodeGenerator::emitStore(const Type &type) {
-    if (type.valueSize() == 1) {
+    emitBoolNormalize(type);
+    if (type.isFloating()) {
+        emitLine(std::string("    mov") + (type.kind == TypeKind::Float ? "ss" : "sd") + " [rcx], xmm0");
+    } else if (type.valueSize() == 1) {
         emitLine("    mov byte [rcx], al");
     } else if (type.valueSize() == 2) {
         emitLine("    mov word [rcx], ax");
@@ -826,6 +1030,59 @@ void CodeGenerator::emitStore(const Type &type) {
         emitLine("    mov dword [rcx], eax");
     } else {
         emitLine("    mov qword [rcx], rax");
+    }
+}
+
+void CodeGenerator::emitValueConversion(const Type &sourceType, const Type &targetType) {
+    if (sourceType.equals(targetType)) {
+        return;
+    }
+
+    if (sourceType.isFloating() && targetType.isFloating()) {
+        emitConvertFloatingValue(sourceType, targetType);
+        return;
+    }
+
+    if (sourceType.isInteger() && targetType.isFloating()) {
+        if (sourceType.valueSize() > 4) {
+            emitLine(std::string("    cvtsi2s") + (targetType.kind == TypeKind::Float ? "s" : "d") + " xmm0, rax");
+        } else {
+            emitLine(std::string("    cvtsi2s") + (targetType.kind == TypeKind::Float ? "s" : "d") + " xmm0, eax");
+        }
+        if (sourceType.isUnsignedInteger() && sourceType.valueSize() == 8) {
+            emitLine("    ; unsigned 64-bit to float/double currently follows signed conversion semantics");
+        }
+        return;
+    }
+
+    if (sourceType.isFloating() && targetType.isInteger()) {
+        if (sourceType.kind == TypeKind::Float) {
+            if (targetType.valueSize() > 4) {
+                emitLine("    cvttss2si rax, xmm0");
+            } else {
+                emitLine("    cvttss2si eax, xmm0");
+            }
+        } else {
+            if (targetType.valueSize() > 4) {
+                emitLine("    cvttsd2si rax, xmm0");
+            } else {
+                emitLine("    cvttsd2si eax, xmm0");
+            }
+        }
+        return;
+    }
+}
+
+void CodeGenerator::emitConvertFloatingValue(const Type &sourceType, const Type &targetType) {
+    if (!sourceType.isFloating() || !targetType.isFloating() || sourceType.kind == targetType.kind) {
+        return;
+    }
+    if (sourceType.kind == TypeKind::Float && targetType.kind == TypeKind::Double) {
+        emitLine("    cvtss2sd xmm0, xmm0");
+        return;
+    }
+    if (sourceType.kind == TypeKind::Double && targetType.kind == TypeKind::Float) {
+        emitLine("    cvtsd2ss xmm0, xmm0");
     }
 }
 
@@ -856,6 +1113,25 @@ int CodeGenerator::pointeeSize(const Type &type) const {
         throw std::runtime_error("internal code generation error");
     }
     return type.elementType->valueSize();
+}
+
+bool CodeGenerator::useUnsignedIntegerOps(const Type &type) const {
+    return type.isUnsignedInteger();
+}
+
+bool CodeGenerator::useUnsignedComparison(const BinaryExpr &binary) const {
+    TypePtr left = binary.left->type->decay();
+    TypePtr right = binary.right->type->decay();
+    if (!left->isInteger() || !right->isInteger()) {
+        return false;
+    }
+    if (left->valueSize() > right->valueSize()) {
+        return left->isUnsignedInteger();
+    }
+    if (right->valueSize() > left->valueSize()) {
+        return right->isUnsignedInteger();
+    }
+    return left->isUnsignedInteger() || right->isUnsignedInteger();
 }
 
 const CodeGenerator::RegisterSet &CodeGenerator::argumentRegister(int index) const {
@@ -920,6 +1196,37 @@ std::string CodeGenerator::stringLabel(const std::string &value) {
         line << ", ";
     }
     line << "0";
+    emitRdataLine(line.str());
+    return label;
+}
+
+std::string CodeGenerator::floatLiteralLabel(double value, bool isFloat32) {
+    if (isFloat32) {
+        const float narrowed = static_cast<float>(value);
+        std::uint32_t bits = 0;
+        std::memcpy(&bits, &narrowed, sizeof(bits));
+        const auto found = float32Labels.find(bits);
+        if (found != float32Labels.end()) {
+            return found->second;
+        }
+        const std::string label = "flt_" + std::to_string(float32Labels.size());
+        float32Labels.emplace(bits, label);
+        std::ostringstream line;
+        line << label << ": dd 0x" << std::hex << bits;
+        emitRdataLine(line.str());
+        return label;
+    }
+
+    std::uint64_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    const auto found = float64Labels.find(bits);
+    if (found != float64Labels.end()) {
+        return found->second;
+    }
+    const std::string label = "dbl_" + std::to_string(float64Labels.size());
+    float64Labels.emplace(bits, label);
+    std::ostringstream line;
+    line << label << ": dq 0x" << std::hex << bits;
     emitRdataLine(line.str());
     return label;
 }

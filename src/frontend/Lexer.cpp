@@ -167,8 +167,8 @@ void Lexer::skipWhitespaceAndComments() {
     }
 }
 
-Token Lexer::makeToken(TokenKind kind, std::string lexeme, int value) const {
-    return Token{kind, std::move(lexeme), value, "", tokenLine, tokenColumn};
+Token Lexer::makeToken(TokenKind kind, std::string lexeme, int value, double doubleValue) const {
+    return Token{kind, std::move(lexeme), value, doubleValue, "", tokenLine, tokenColumn};
 }
 
 Token Lexer::lexNumber() {
@@ -179,7 +179,19 @@ Token Lexer::lexNumber() {
         advance();
     }
 
+    bool isFloating = false;
+    if (!isAtEnd() && peek() == '.' && std::isdigit(static_cast<unsigned char>(peekNext()))) {
+        isFloating = true;
+        advance();
+        while (!isAtEnd() && std::isdigit(static_cast<unsigned char>(peek()))) {
+            advance();
+        }
+    }
+
     const std::string lexeme = source.substr(start, current - start);
+    if (isFloating) {
+        return makeToken(TokenKind::FloatLiteral, lexeme, 0, std::stod(lexeme));
+    }
     return makeToken(TokenKind::Number, lexeme, std::stoi(lexeme));
 }
 
@@ -246,6 +258,15 @@ Token Lexer::lexIdentifierOrKeyword() {
     }
 
     const std::string lexeme = source.substr(start, current - start);
+    if (lexeme == "_Bool") {
+        return makeToken(TokenKind::KeywordBool, lexeme);
+    }
+    if (lexeme == "float") {
+        return makeToken(TokenKind::KeywordFloat, lexeme);
+    }
+    if (lexeme == "double") {
+        return makeToken(TokenKind::KeywordDouble, lexeme);
+    }
     if (lexeme == "char") {
         return makeToken(TokenKind::KeywordChar, lexeme);
     }
@@ -260,6 +281,12 @@ Token Lexer::lexIdentifierOrKeyword() {
     }
     if (lexeme == "void") {
         return makeToken(TokenKind::KeywordVoid, lexeme);
+    }
+    if (lexeme == "signed") {
+        return makeToken(TokenKind::KeywordSigned, lexeme);
+    }
+    if (lexeme == "unsigned") {
+        return makeToken(TokenKind::KeywordUnsigned, lexeme);
     }
     if (lexeme == "extern") {
         return makeToken(TokenKind::KeywordExtern, lexeme);

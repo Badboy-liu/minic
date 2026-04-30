@@ -52,7 +52,9 @@ private:
     TypePtr decayType(const TypePtr &type) const;
     TypePtr promoteIntegerType(const TypePtr &type) const;
     TypePtr commonIntegerType(const TypePtr &left, const TypePtr &right) const;
+    TypePtr commonArithmeticType(const TypePtr &left, const TypePtr &right) const;
     int integerRank(const TypePtr &type) const;
+    bool canRepresentAllValues(const TypePtr &target, const TypePtr &source) const;
     std::string typeName(const TypePtr &type) const;
     [[noreturn]] void fail(const std::string &message) const;
     static int alignTo(int value, int alignment);

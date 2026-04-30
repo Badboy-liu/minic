@@ -5,11 +5,19 @@
 #include <vector>
 
 enum class TypeKind {
+    Bool,
     Char,
+    UnsignedChar,
     Short,
+    UnsignedShort,
     Int,
+    UnsignedInt,
     Long,
+    UnsignedLong,
     LongLong,
+    UnsignedLongLong,
+    Float,
+    Double,
     Void,
     Function,
     Pointer,
@@ -29,24 +37,56 @@ struct Type {
         return std::make_shared<Type>(Type{TypeKind::Int, nullptr, 0, {}});
     }
 
+    static TypePtr makeBool() {
+        return std::make_shared<Type>(Type{TypeKind::Bool, nullptr, 0, {}});
+    }
+
     static TypePtr makeChar() {
         return std::make_shared<Type>(Type{TypeKind::Char, nullptr, 0, {}});
+    }
+
+    static TypePtr makeUnsignedChar() {
+        return std::make_shared<Type>(Type{TypeKind::UnsignedChar, nullptr, 0, {}});
     }
 
     static TypePtr makeShort() {
         return std::make_shared<Type>(Type{TypeKind::Short, nullptr, 0, {}});
     }
 
+    static TypePtr makeUnsignedShort() {
+        return std::make_shared<Type>(Type{TypeKind::UnsignedShort, nullptr, 0, {}});
+    }
+
     static TypePtr makeLong() {
         return std::make_shared<Type>(Type{TypeKind::Long, nullptr, 0, {}});
+    }
+
+    static TypePtr makeUnsignedInt() {
+        return std::make_shared<Type>(Type{TypeKind::UnsignedInt, nullptr, 0, {}});
+    }
+
+    static TypePtr makeUnsignedLong() {
+        return std::make_shared<Type>(Type{TypeKind::UnsignedLong, nullptr, 0, {}});
     }
 
     static TypePtr makeLongLong() {
         return std::make_shared<Type>(Type{TypeKind::LongLong, nullptr, 0, {}});
     }
 
+    static TypePtr makeUnsignedLongLong() {
+        return std::make_shared<Type>(Type{TypeKind::UnsignedLongLong, nullptr, 0, {}});
+    }
+
     static TypePtr makeVoid() {
         return std::make_shared<Type>(Type{TypeKind::Void, nullptr, 0, {}});
+    }
+
+    static TypePtr makeFloat() {
+        return std::make_shared<Type>(Type{TypeKind::Float, nullptr, 0, {}});
+    }
+
+    static TypePtr makeDouble() {
+        return std::make_shared<Type>(Type{TypeKind::Double, nullptr, 0, {}});
     }
 
     static TypePtr makeFunction(TypePtr returnType, std::vector<TypePtr> parameterTypesValue) {
@@ -90,15 +130,38 @@ struct Type {
     }
 
     bool isInteger() const {
-        return kind == TypeKind::Char ||
+        return kind == TypeKind::Bool ||
+            kind == TypeKind::Char ||
+            kind == TypeKind::UnsignedChar ||
             kind == TypeKind::Short ||
+            kind == TypeKind::UnsignedShort ||
             kind == TypeKind::Int ||
+            kind == TypeKind::UnsignedInt ||
             kind == TypeKind::Long ||
-            kind == TypeKind::LongLong;
+            kind == TypeKind::UnsignedLong ||
+            kind == TypeKind::LongLong ||
+            kind == TypeKind::UnsignedLongLong;
+    }
+
+    bool isUnsignedInteger() const {
+        return kind == TypeKind::Bool ||
+            kind == TypeKind::UnsignedChar ||
+            kind == TypeKind::UnsignedShort ||
+            kind == TypeKind::UnsignedInt ||
+            kind == TypeKind::UnsignedLong ||
+            kind == TypeKind::UnsignedLongLong;
+    }
+
+    bool isSignedInteger() const {
+        return isInteger() && !isUnsignedInteger();
     }
 
     bool isVoid() const {
         return kind == TypeKind::Void;
+    }
+
+    bool isFloating() const {
+        return kind == TypeKind::Float || kind == TypeKind::Double;
     }
 
     bool isPointer() const {
@@ -114,19 +177,34 @@ struct Type {
     }
 
     bool isScalar() const {
-        return isInteger() || isPointer();
+        return isInteger() || isFloating() || isPointer();
+    }
+
+    bool isArithmetic() const {
+        return isInteger() || isFloating();
     }
 
     int valueSize() const {
         switch (kind) {
+        case TypeKind::Bool:
+            return 1;
         case TypeKind::Char:
+        case TypeKind::UnsignedChar:
             return 1;
         case TypeKind::Short:
+        case TypeKind::UnsignedShort:
             return 2;
         case TypeKind::Int:
+        case TypeKind::UnsignedInt:
         case TypeKind::Long:
+        case TypeKind::UnsignedLong:
             return 4;
         case TypeKind::LongLong:
+        case TypeKind::UnsignedLongLong:
+            return 8;
+        case TypeKind::Float:
+            return 4;
+        case TypeKind::Double:
             return 8;
         case TypeKind::Void:
         case TypeKind::Function:
@@ -183,6 +261,7 @@ enum class BinaryOp {
 struct Expr {
     enum class Kind {
         Number,
+        FloatNumber,
         String,
         Variable,
         Unary,
@@ -204,6 +283,12 @@ struct Expr {
 struct NumberExpr : Expr {
     explicit NumberExpr(int valueValue) : Expr(Kind::Number), value(valueValue) {}
     int value;
+};
+
+struct FloatExpr : Expr {
+    explicit FloatExpr(double valueValue) : Expr(Kind::FloatNumber), value(valueValue) {}
+    double value;
+    std::string label;
 };
 
 struct StringExpr : Expr {

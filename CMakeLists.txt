@@ -21,8 +21,13 @@ set(MINIC_CORE_SOURCES
     src/support/Toolchain.h
     src/linker/PeLinker.cpp
     src/linker/PeLinker.h
+    src/backend/CoffObjectWriter.cpp
+    src/backend/CoffObjectWriter.h
     src/backend/CodeGenerator.cpp
     src/backend/CodeGenerator.h
+    src/backend/ObjectFileModel.h
+    src/backend/WindowsObjectEmitter.cpp
+    src/backend/WindowsObjectEmitter.h
     src/frontend/Semantics.cpp
     src/frontend/Semantics.h
     src/frontend/Parser.cpp
@@ -159,6 +164,159 @@ if (WIN32)
     )
 
     add_minic_regression_test(
+        minic_answer_direct_coff
+        SOURCES input/answer.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/answer_direct_coff.exe
+        OUTPUT_EXE build/output/answer_direct_coff.exe
+        EXPECTED_EXIT 42
+        LABELS regression phase-current coff windows
+    )
+
+    add_minic_regression_test(
+        minic_logic_loop_direct_coff
+        SOURCES input/tmp_logic_loop.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_logic_loop_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_logic_loop_direct_coff.exe
+        EXPECTED_EXIT 9
+        LABELS regression phase-current coff windows
+    )
+
+    add_minic_regression_test(
+        minic_globals_main_direct_coff
+        SOURCES input/tmp_globals_main.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_globals_main_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_globals_main_direct_coff.exe
+        EXPECTED_EXIT 42
+        LABELS regression phase-current coff windows
+    )
+
+    add_minic_regression_test(
+        minic_global_ptr_to_global_direct_coff
+        SOURCES input/tmp_global_ptr_to_global.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_global_ptr_to_global_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_global_ptr_to_global_direct_coff.exe
+        EXPECTED_EXIT 42
+        LABELS regression phase-current coff windows
+    )
+
+    add_minic_regression_test(
+        minic_global_ptr_to_string_direct_coff
+        SOURCES input/tmp_global_ptr_to_string.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_global_ptr_to_string_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_global_ptr_to_string_direct_coff.exe
+        EXPECTED_EXIT 65
+        LABELS regression phase-current coff windows
+    )
+
+    add_minic_regression_test(
+        minic_bss_integrity_direct_coff
+        SOURCES input/tmp_bss_integrity.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_bss_integrity_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_bss_integrity_direct_coff.exe
+        EXPECTED_EXIT 42
+        LABELS regression phase-current coff windows
+    )
+
+    add_minic_regression_test(
+        minic_windows_stack_args_direct_coff
+        SOURCES input/tmp_four_args.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_four_args_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_four_args_direct_coff.exe
+        EXPECTED_EXIT 42
+        LABELS regression phase-current coff windows abi
+    )
+
+    add_minic_regression_test(
+        minic_multifile_direct_coff
+        SOURCES input/tmp_multi_main.c input/tmp_multi_math.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_multi_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_multi_direct_coff.exe
+        EXPECTED_EXIT 42
+        LABELS regression phase-current coff windows multifile
+    )
+
+    add_minic_regression_test(
+        minic_import_puts_direct_coff
+        SOURCES input/tmp_import_msvcrt_puts.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_import_msvcrt_puts_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_import_msvcrt_puts_direct_coff.exe
+        EXPECTED_EXIT 1
+        LABELS regression phase-current coff windows imports
+    )
+
+    add_minic_regression_test(
+        minic_local_int_array_direct_coff
+        SOURCES input/tmp_if.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_if_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_if_direct_coff.exe
+        EXPECTED_EXIT 42
+        LABELS regression phase-current coff windows initializers
+    )
+
+    add_minic_regression_test(
+        minic_local_string_direct_coff
+        SOURCES input/tmp_string_local.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_string_local_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_string_local_direct_coff.exe
+        EXPECTED_EXIT 65
+        LABELS regression phase-current coff windows initializers
+    )
+
+    add_minic_regression_test(
+        minic_basic_types_direct_coff
+        SOURCES input/tmp_basic_types.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_basic_types_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_basic_types_direct_coff.exe
+        EXPECTED_EXIT 42
+        LABELS regression phase-current coff windows semantics
+    )
+
+    add_minic_regression_test(
+        minic_local_ptr_array_direct_coff
+        SOURCES input/tmp_void_ptr.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_void_ptr_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_void_ptr_direct_coff.exe
+        EXPECTED_EXIT 42
+        LABELS regression phase-current coff windows initializers
+    )
+
+    add_minic_regression_test(
+        minic_function_ptr_global_direct_coff
+        SOURCES input/tmp_function_ptr_global.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_function_ptr_global_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_function_ptr_global_direct_coff.exe
+        EXPECTED_EXIT 42
+        LABELS regression phase-current coff windows relocations
+    )
+
+    add_minic_regression_test(
+        minic_function_ptr_table_direct_coff
+        SOURCES input/tmp_function_ptr_table.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_function_ptr_table_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_function_ptr_table_direct_coff.exe
+        EXPECTED_EXIT 2
+        LABELS regression phase-current coff windows relocations
+    )
+
+    add_minic_regression_test(
+        minic_import_printf_direct_coff
+        SOURCES input/tmp_import_printf_simple.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_import_printf_simple_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_import_printf_simple_direct_coff.exe
+        EXPECTED_EXIT 1
+        LABELS regression phase-current coff windows imports
+    )
+
+    add_minic_regression_test(
+        minic_import_triple_direct_coff
+        SOURCES input/tmp_import_msvcrt_triple.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_import_msvcrt_triple_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_import_msvcrt_triple_direct_coff.exe
+        EXPECTED_EXIT 1
+        LABELS regression phase-current coff windows imports
+    )
+
+    add_minic_regression_test(
         minic_local_string_init
         SOURCES input/tmp_string_local.c
         OUTPUT_EXE build/output/tmp_string_local.exe
@@ -205,6 +363,54 @@ if (WIN32)
         minic_mixed_integer_conversions
         SOURCES input/tmp_basic_types.c
         OUTPUT_EXE build/output/tmp_basic_types.exe
+        EXPECTED_EXIT 42
+        LABELS regression phase-current semantics
+    )
+
+    add_minic_regression_test(
+        minic_unsigned_compare
+        SOURCES input/tmp_unsigned_compare.c
+        OUTPUT_EXE build/output/tmp_unsigned_compare.exe
+        EXPECTED_EXIT 42
+        LABELS regression phase-current semantics
+    )
+
+    add_minic_regression_test(
+        minic_bool_normalize
+        SOURCES input/tmp_bool_normalize.c
+        OUTPUT_EXE build/output/tmp_bool_normalize.exe
+        EXPECTED_EXIT 1
+        LABELS regression phase-current semantics
+    )
+
+    add_minic_regression_test(
+        minic_double_math
+        SOURCES input/tmp_double_math.c
+        OUTPUT_EXE build/output/tmp_double_math.exe
+        EXPECTED_EXIT 42
+        LABELS regression phase-current semantics
+    )
+
+    add_minic_regression_test(
+        minic_float_math
+        SOURCES input/tmp_float_math.c
+        OUTPUT_EXE build/output/tmp_float_math.exe
+        EXPECTED_EXIT 42
+        LABELS regression phase-current semantics
+    )
+
+    add_minic_regression_test(
+        minic_mixed_int_double
+        SOURCES input/tmp_mixed_int_double.c
+        OUTPUT_EXE build/output/tmp_mixed_int_double.exe
+        EXPECTED_EXIT 42
+        LABELS regression phase-current semantics
+    )
+
+    add_minic_regression_test(
+        minic_double_to_int_return
+        SOURCES input/tmp_double_to_int_return.c
+        OUTPUT_EXE build/output/tmp_double_to_int_return.exe
         EXPECTED_EXIT 42
         LABELS regression phase-current semantics
     )

@@ -438,6 +438,10 @@ void SemanticAnalyzer::analyzeExpr(Expr &expr) {
         expr.type = Type::makeInt();
         expr.isLValue = false;
         return;
+    case Expr::Kind::FloatNumber:
+        expr.type = Type::makeDouble();
+        expr.isLValue = false;
+        return;
     case Expr::Kind::String: {
         auto &stringExpr = static_cast<StringExpr &>(expr);
         expr.type = Type::makeArray(Type::makeChar(), static_cast<int>(stringExpr.value.size()) + 1);
@@ -462,10 +466,12 @@ void SemanticAnalyzer::analyzeExpr(Expr &expr) {
         switch (unary.op) {
         case UnaryOp::Plus:
         case UnaryOp::Minus:
-            if (!unary.operand->type->isInteger()) {
-                fail("unary +/- requires int operand");
+            if (!unary.operand->type->isArithmetic()) {
+                fail("unary +/- requires arithmetic operand");
             }
-            expr.type = promoteIntegerType(unary.operand->type);
+            expr.type = unary.operand->type->isFloating()
+                ? decayType(unary.operand->type)
+                : promoteIntegerType(unary.operand->type);
             expr.isLValue = false;
             return;
         case UnaryOp::LogicalNot:
@@ -487,6 +493,9 @@ void SemanticAnalyzer::analyzeExpr(Expr &expr) {
             if (!operandType->isPointer()) {
                 fail("dereference requires pointer operand");
             }
+            if (operandType->elementType->isVoid()) {
+                fail("cannot dereference void*");
+            }
             expr.type = operandType->elementType;
             expr.isLValue = !expr.type->isFunction();
             return;
@@ -503,8 +512,11 @@ void SemanticAnalyzer::analyzeExpr(Expr &expr) {
 
         switch (binary.op) {
         case BinaryOp::Add:
-            if (leftType->isInteger() && rightType->isInteger()) {
-                expr.type = commonIntegerType(leftType, rightType);
+            if ((leftType->isFloating() && rightType->isFloating()) ||
+                (leftType->isInteger() && rightType->isInteger()) ||
+                (leftType->isFloating() && rightType->isInteger()) ||
+                (leftType->isInteger() && rightType->isFloating())) {
+                expr.type = commonArithmeticType(leftType, rightType);
             } else if (leftType->isPointer() && rightType->isInteger()) {
                 expr.type = leftType;
             } else if (leftType->isInteger() && rightType->isPointer()) {
@@ -515,8 +527,11 @@ void SemanticAnalyzer::analyzeExpr(Expr &expr) {
             expr.isLValue = false;
             return;
         case BinaryOp::Subtract:
-            if (leftType->isInteger() && rightType->isInteger()) {
-                expr.type = commonIntegerType(leftType, rightType);
+            if ((leftType->isFloating() && rightType->isFloating()) ||
+                (leftType->isInteger() && rightType->isInteger()) ||
+                (leftType->isFloating() && rightType->isInteger()) ||
+                (leftType->isInteger() && rightType->isFloating())) {
+                expr.type = commonArithmeticType(leftType, rightType);
             } else if (leftType->isPointer() && rightType->isInteger()) {
                 expr.type = leftType;
             } else {
@@ -526,15 +541,23 @@ void SemanticAnalyzer::analyzeExpr(Expr &expr) {
             return;
         case BinaryOp::Multiply:
         case BinaryOp::Divide:
-            if (!leftType->isInteger() || !rightType->isInteger()) {
-                fail("arithmetic operator requires int operands");
+            if (!((leftType->isFloating() && rightType->isFloating()) ||
+                (leftType->isInteger() && rightType->isInteger()) ||
+                (leftType->isFloating() && rightType->isInteger()) ||
+                (leftType->isInteger() && rightType->isFloating()))) {
+                fail("arithmetic operator requires arithmetic operands");
             }
-            expr.type = commonIntegerType(leftType, rightType);
+            expr.type = commonArithmeticType(leftType, rightType);
             expr.isLValue = false;
             return;
         case BinaryOp::Equal:
         case BinaryOp::NotEqual:
-            if (!(sameType(leftType, rightType) || (leftType->isScalar() && rightType->isScalar()))) {
+            if (!(sameType(leftType, rightType) ||
+                (leftType->isFloating() && rightType->isFloating()) ||
+                (leftType->isInteger() && rightType->isInteger()) ||
+                (leftType->isFloating() && rightType->isInteger()) ||
+                (leftType->isInteger() && rightType->isFloating()) ||
+                (leftType->isScalar() && rightType->isScalar()))) {
                 fail("incompatible operands to equality operator");
             }
             expr.type = Type::makeInt();
@@ -552,8 +575,11 @@ void SemanticAnalyzer::analyzeExpr(Expr &expr) {
         case BinaryOp::LessEqual:
         case BinaryOp::Greater:
         case BinaryOp::GreaterEqual:
-            if (!leftType->isInteger() || !rightType->isInteger()) {
-                fail("comparison operator requires int operands");
+            if (!((leftType->isFloating() && rightType->isFloating()) ||
+                (leftType->isInteger() && rightType->isInteger()) ||
+                (leftType->isFloating() && rightType->isInteger()) ||
+                (leftType->isInteger() && rightType->isFloating()))) {
+                fail("comparison operator requires arithmetic operands");
             }
             expr.type = Type::makeInt();
             expr.isLValue = false;
@@ -695,6 +721,15 @@ bool SemanticAnalyzer::canAssign(const TypePtr &target, const TypePtr &value) co
     if (target->isInteger() && decayedValue->isInteger()) {
         return true;
     }
+    if (target->isFloating() && decayedValue->isFloating()) {
+        return true;
+    }
+    if (target->isFloating() && decayedValue->isInteger()) {
+        return true;
+    }
+    if (target->isInteger() && decayedValue->isFloating()) {
+        return true;
+    }
     return sameType(target, decayedValue);
 }
 
@@ -705,6 +740,15 @@ bool SemanticAnalyzer::sameType(const TypePtr &left, const TypePtr &right) const
 bool SemanticAnalyzer::isEquivalentArgumentType(const TypePtr &param, const TypePtr &arg) const {
     TypePtr decayedArg = decayType(arg);
     if (param->isInteger() && decayedArg->isInteger()) {
+        return true;
+    }
+    if (param->isFloating() && decayedArg->isFloating()) {
+        return true;
+    }
+    if (param->isFloating() && decayedArg->isInteger()) {
+        return true;
+    }
+    if (param->isInteger() && decayedArg->isFloating()) {
         return true;
     }
     return sameType(param, decayedArg);
@@ -718,7 +762,11 @@ TypePtr SemanticAnalyzer::promoteIntegerType(const TypePtr &type) const {
     if (!type->isInteger()) {
         return type;
     }
-    if (type->kind == TypeKind::Char || type->kind == TypeKind::Short) {
+    if (type->kind == TypeKind::Bool ||
+        type->kind == TypeKind::Char ||
+        type->kind == TypeKind::UnsignedChar ||
+        type->kind == TypeKind::Short ||
+        type->kind == TypeKind::UnsignedShort) {
         return Type::makeInt();
     }
     return std::make_shared<Type>(*type);
@@ -727,40 +775,107 @@ TypePtr SemanticAnalyzer::promoteIntegerType(const TypePtr &type) const {
 TypePtr SemanticAnalyzer::commonIntegerType(const TypePtr &left, const TypePtr &right) const {
     TypePtr promotedLeft = promoteIntegerType(left);
     TypePtr promotedRight = promoteIntegerType(right);
-    return integerRank(promotedLeft) >= integerRank(promotedRight)
-        ? promotedLeft
-        : promotedRight;
+    if (sameType(promotedLeft, promotedRight)) {
+        return promotedLeft;
+    }
+
+    if (promotedLeft->isUnsignedInteger() == promotedRight->isUnsignedInteger()) {
+        return integerRank(promotedLeft) >= integerRank(promotedRight) ? promotedLeft : promotedRight;
+    }
+
+    const TypePtr &unsignedType = promotedLeft->isUnsignedInteger() ? promotedLeft : promotedRight;
+    const TypePtr &signedType = promotedLeft->isUnsignedInteger() ? promotedRight : promotedLeft;
+    if (integerRank(unsignedType) >= integerRank(signedType)) {
+        return unsignedType;
+    }
+    if (canRepresentAllValues(signedType, unsignedType)) {
+        return signedType;
+    }
+
+    switch (signedType->kind) {
+    case TypeKind::Int:
+        return Type::makeUnsignedInt();
+    case TypeKind::Long:
+        return Type::makeUnsignedLong();
+    case TypeKind::LongLong:
+        return Type::makeUnsignedLongLong();
+    default:
+        return unsignedType;
+    }
+}
+
+TypePtr SemanticAnalyzer::commonArithmeticType(const TypePtr &left, const TypePtr &right) const {
+    if (left->isFloating() || right->isFloating()) {
+        if (left->kind == TypeKind::Double || right->kind == TypeKind::Double) {
+            return Type::makeDouble();
+        }
+        return Type::makeFloat();
+    }
+    return commonIntegerType(left, right);
 }
 
 int SemanticAnalyzer::integerRank(const TypePtr &type) const {
     switch (type->kind) {
+    case TypeKind::Bool:
+        return 0;
     case TypeKind::Char:
+    case TypeKind::UnsignedChar:
         return 1;
     case TypeKind::Short:
+    case TypeKind::UnsignedShort:
         return 2;
     case TypeKind::Int:
+    case TypeKind::UnsignedInt:
         return 3;
     case TypeKind::Long:
+    case TypeKind::UnsignedLong:
         return 4;
     case TypeKind::LongLong:
+    case TypeKind::UnsignedLongLong:
         return 5;
     default:
         return 0;
     }
 }
 
+bool SemanticAnalyzer::canRepresentAllValues(const TypePtr &target, const TypePtr &source) const {
+    if (!target->isInteger() || !source->isInteger()) {
+        return false;
+    }
+    if (target->isUnsignedInteger()) {
+        return false;
+    }
+    return target->valueSize() > source->valueSize();
+}
+
 std::string SemanticAnalyzer::typeName(const TypePtr &type) const {
     switch (type->kind) {
+    case TypeKind::Bool:
+        return "_Bool";
     case TypeKind::Char:
         return "char";
+    case TypeKind::UnsignedChar:
+        return "unsigned char";
     case TypeKind::Short:
         return "short";
+    case TypeKind::UnsignedShort:
+        return "unsigned short";
     case TypeKind::Int:
         return "int";
+    case TypeKind::UnsignedInt:
+        return "unsigned int";
     case TypeKind::Long:
         return "long";
+    case TypeKind::UnsignedLong:
+        return "unsigned long";
     case TypeKind::LongLong:
         return "long long";
+    case TypeKind::UnsignedLongLong:
+        return "unsigned long long";
+    case TypeKind::Float:
+        return "float";
+    case TypeKind::Double:
+        return "double";
     case TypeKind::Void:
         return "void";
     case TypeKind::Function: {

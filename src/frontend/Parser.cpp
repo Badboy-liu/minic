@@ -218,6 +218,20 @@ std::unique_ptr<Expr> Parser::parseInitializer() {
 }
 
 TypePtr Parser::parseBaseType() {
+    if (match(TokenKind::KeywordBool)) {
+        return Type::makeBool();
+    }
+    if (match(TokenKind::KeywordFloat)) {
+        return Type::makeFloat();
+    }
+    if (match(TokenKind::KeywordDouble)) {
+        return Type::makeDouble();
+    }
+    const bool sawSigned = match(TokenKind::KeywordSigned);
+    const bool sawUnsigned = !sawSigned && match(TokenKind::KeywordUnsigned);
+    if (sawSigned || sawUnsigned) {
+        return parseNumericType(sawSigned, sawUnsigned);
+    }
     if (match(TokenKind::KeywordChar)) {
         return Type::makeChar();
     }
@@ -237,6 +251,28 @@ TypePtr Parser::parseBaseType() {
         return Type::makeVoid();
     }
     fail(peek(), "expected type specifier");
+}
+
+TypePtr Parser::parseNumericType(bool sawSigned, bool sawUnsigned) {
+    if (match(TokenKind::KeywordChar)) {
+        return sawUnsigned ? Type::makeUnsignedChar() : Type::makeChar();
+    }
+    if (match(TokenKind::KeywordShort)) {
+        match(TokenKind::KeywordInt);
+        return sawUnsigned ? Type::makeUnsignedShort() : Type::makeShort();
+    }
+    if (match(TokenKind::KeywordInt)) {
+        return sawUnsigned ? Type::makeUnsignedInt() : Type::makeInt();
+    }
+    if (match(TokenKind::KeywordLong)) {
+        const bool isLongLong = match(TokenKind::KeywordLong);
+        match(TokenKind::KeywordInt);
+        if (isLongLong) {
+            return sawUnsigned ? Type::makeUnsignedLongLong() : Type::makeLongLong();
+        }
+        return sawUnsigned ? Type::makeUnsignedLong() : Type::makeLong();
+    }
+    fail(peek(), sawSigned ? "expected type after 'signed'" : "expected type after 'unsigned'");
 }
 
 std::unique_ptr<BlockStmt> Parser::parseBlock() {
@@ -527,6 +563,9 @@ std::unique_ptr<Expr> Parser::parsePrimary() {
     if (match(TokenKind::Number)) {
         return std::make_unique<NumberExpr>(previous().intValue);
     }
+    if (match(TokenKind::FloatLiteral)) {
+        return std::make_unique<FloatExpr>(previous().doubleValue);
+    }
     if (match(TokenKind::StringLiteral)) {
         return std::make_unique<StringExpr>(previous().stringValue);
     }
@@ -543,10 +582,15 @@ std::unique_ptr<Expr> Parser::parsePrimary() {
 }
 
 bool Parser::isTypeSpecifier(TokenKind kind) const {
-    return kind == TokenKind::KeywordChar ||
+    return kind == TokenKind::KeywordBool ||
+        kind == TokenKind::KeywordChar ||
         kind == TokenKind::KeywordShort ||
         kind == TokenKind::KeywordInt ||
         kind == TokenKind::KeywordLong ||
+        kind == TokenKind::KeywordFloat ||
+        kind == TokenKind::KeywordDouble ||
+        kind == TokenKind::KeywordSigned ||
+        kind == TokenKind::KeywordUnsigned ||
         kind == TokenKind::KeywordVoid;
 }
 
