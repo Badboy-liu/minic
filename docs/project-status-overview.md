@@ -1,6 +1,6 @@
 # Project Status Overview
 
-Date: 2026-04-28
+Date: 2026-04-30
 
 Document type:
 
@@ -15,6 +15,8 @@ The strongest part of the project is no longer just parsing or code generation i
 
 At the same time, the project is still intentionally narrow in scope. It is best understood as a teaching-oriented compiler and linker prototype, not a broadly capable systems compiler.
 
+Since the previous status snapshot, the biggest practical shift is that the Windows direct COFF backend is no longer limited to a small integer-only baseline. It now covers a much larger pure-C teaching path, including multi-file linking, globals, pointer-oriented relocation cases, import-driven programs, selected `long long` samples, and the current floating-point teaching subset.
+
 ## Status By Pipeline Stage
 
 ### 1. Front End
@@ -24,6 +26,7 @@ Current status:
 - lexer, parser, and semantic analysis are broadly stable for the currently supported C subset
 - the project now supports more than trivial single-function programs
 - multi-file functions, global variables, and `.bss`-backed tentative definitions are already integrated into the front-end-to-linker flow
+- current front-end support also includes `_Bool`, signed/unsigned integer families, and the current teaching subset of `float` / `double`
 
 Assessment:
 
@@ -32,7 +35,7 @@ Assessment:
 
 Approximate maturity:
 
-- 60% to 70%
+- 70% to 75%
 
 ### 2. Code Generation
 
@@ -41,6 +44,10 @@ Current status:
 - Windows x64 code generation is the main working path
 - Linux support already exists for assembly and object emission
 - the target abstraction is strong enough to support multiple output targets at the code generation layer
+- Windows now has two meaningful object-generation paths:
+  - the older NASM assembly path
+  - the newer direct COFF object emitter path
+- the direct COFF path now covers a broad teaching subset of pure-C Windows programs, including floating-point cases in the current regression suite
 
 Assessment:
 
@@ -49,7 +56,9 @@ Assessment:
 
 Approximate maturity:
 
-- about 65%
+- Windows NASM backend: about 75%
+- Windows direct COFF backend: about 65%
+- Linux code generation path: about 35% to 40%
 
 ### 3. Object Files And Linking
 
@@ -76,6 +85,9 @@ Current status:
   - resolved symbols
   - relocations
 - automated regression coverage now exists for the current teaching phase
+- test labels now make a clearer distinction between:
+  - Windows `coff` regressions that exercise the direct object path
+  - `nasm-only` / `external-object` regressions that intentionally validate linker interoperability with hand-written `.asm` or prebuilt `.obj`
 
 Assessment:
 
@@ -95,7 +107,7 @@ That includes:
 
 - compiler front end
 - Windows code generation
-- COFF object emission through NASM
+- COFF object emission through both NASM and the direct COFF backend
 - built-in PE linking
 - section-aware and relocation-aware debugging support
 - regression coverage for the current teaching examples
@@ -104,7 +116,7 @@ This is the part of the project with the clearest identity.
 
 ## Weakest Area
 
-The weakest technical area in the full toolchain is still the PE/COFF linker's support breadth.
+The weakest technical area in the full toolchain is now less about "can the compiler emit objects at all" and more about feature breadth and backend convergence.
 
 This is not because the linker is low quality. It is because it now matters more than the rest of the pipeline. The project has already reached the point where the linker is the narrowest part of what the toolchain can safely accept and explain.
 
@@ -114,16 +126,18 @@ The main weak spots are:
 - import handling is still intentionally small even though it now covers multiple DLLs, a few common C runtime calls, and a narrow file-backed extension path
 - compatibility with non-`minic` object producers is intentionally weak
 - failure diagnostics are functional but not yet systematic
+- the direct COFF backend still does not cover every corner that the older NASM backend can reach
+- Linux still depends on the separate NASM/ELF plus system-linker path
 
 ## Weakest Engineering Area
 
-The weakest engineering area is the depth of regression coverage relative to future linker growth.
+The weakest engineering area is no longer simple lack of tests; it is keeping the growing test matrix clearly partitioned by purpose.
 
-Recent work added useful automated tests for the current teaching phase, but the coverage is still concentrated on the current happy path:
+Recent work added a large amount of automated direct COFF coverage, including failure cases, but future growth still needs discipline:
 
-- baseline single-file linking
-- `.bss` integrity
-- multi-file function resolution
+- keeping pure-C backend-coverage tests separate from linker interoperability tests
+- continuing to classify `nasm-only` and `external-object` regressions explicitly
+- adding more floating-point, relocation, and failure-shape combinations as backend breadth grows
 
 The next wave of growth will need:
 
@@ -137,6 +151,7 @@ The project is now best described as:
 
 - a teachable, working end-to-end educational compiler toolchain
 - a strong PE/COFF linker teaching prototype
+- a Windows direct COFF object-emission prototype that is becoming viable for the main pure-C teaching path
 - not yet a broadly capable small systems compiler
 
 Approximate overall maturity:
@@ -153,12 +168,13 @@ The most natural next step is to keep improving the PE/COFF linker, because that
 
 Recommended priority order:
 
-1. Expand relocation coverage
-2. Add more failure-case teaching and regression samples
-3. Extend import handling and file-backed catalog flexibility
+1. Keep expanding the Windows direct COFF backend until the pure-C Windows teaching path no longer depends on NASM
+2. Expand relocation coverage and linker interoperability clarity
+3. Add more failure-case and floating-point coverage
+4. Extend import handling and file-backed catalog flexibility
 
 ## Short Version
 
 In one sentence:
 
-The project's biggest success is that it already demonstrates a real compiler-to-linker pipeline, and its biggest weakness is that the linker still supports only a narrow, carefully controlled PE/COFF subset.
+The project's biggest success is that it now demonstrates both a real compiler-to-linker pipeline and a viable direct COFF Windows teaching path, and its biggest weakness is that backend breadth and interoperability breadth are still carefully controlled.

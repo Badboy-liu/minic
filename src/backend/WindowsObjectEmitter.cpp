@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -90,6 +91,13 @@ enum class RegisterCode : std::uint8_t {
     R11 = 11
 };
 
+enum class XmmRegister : std::uint8_t {
+    Xmm0 = 0,
+    Xmm1 = 1,
+    Xmm2 = 2,
+    Xmm3 = 3
+};
+
 struct PendingJumpPatch {
     std::uint32_t displacementOffset = 0;
     int labelId = 0;
@@ -166,6 +174,9 @@ private:
         if (type.isPointer()) {
             return;
         }
+        if (type.isFloating()) {
+            return;
+        }
         if (type.isInteger() && type.valueSize() <= 4) {
             return;
         }
@@ -212,6 +223,9 @@ private:
         if (type.isPointer()) {
             return;
         }
+        if (type.isFloating()) {
+            return;
+        }
         if (type.isInteger() && type.valueSize() <= 8) {
             return;
         }
@@ -242,6 +256,11 @@ private:
 
         if (global.type->isPointer()) {
             emitGlobalPointer(global);
+            return;
+        }
+
+        if (global.type->isFloating()) {
+            emitGlobalFloatScalar(global);
             return;
         }
 
@@ -316,6 +335,23 @@ private:
         }
     }
 
+    void emitGlobalFloatScalar(const GlobalVar &global) {
+        const int bytes = valueSize(*global.type);
+        const std::uint32_t offset = appendSectionBytes(*data, static_cast<std::uint32_t>(bytes), storageSize(*global.type));
+        addOrUpdateSymbol(global.symbolName, DataSectionIndex, offset, ObjectSymbolBinding::Global);
+        const double value = global.init ? evaluateStaticFloat(*global.init) : 0.0;
+        if (global.type->kind == TypeKind::Float) {
+            const float narrowed = static_cast<float>(value);
+            std::uint32_t bits = 0;
+            std::memcpy(&bits, &narrowed, sizeof(bits));
+            patchLittleEndian(data->bytes, offset, bits, 4);
+            return;
+        }
+        std::uint64_t bits = 0;
+        std::memcpy(&bits, &value, sizeof(bits));
+        patchLittleEndian(data->bytes, offset, static_cast<long long>(bits), 8);
+    }
+
     std::string resolveStaticAddressSymbol(const Expr &expr) {
         if (expr.kind == Expr::Kind::String) {
             return stringLiteralSymbol(static_cast<const StringExpr &>(expr).value);
@@ -339,6 +375,16 @@ private:
         return static_cast<const NumberExpr &>(expr).value;
     }
 
+    double evaluateStaticFloat(const Expr &expr) const {
+        if (expr.kind == Expr::Kind::FloatNumber) {
+            return static_cast<const FloatExpr &>(expr).value;
+        }
+        if (expr.kind == Expr::Kind::Number) {
+            return static_cast<double>(static_cast<const NumberExpr &>(expr).value);
+        }
+        throw std::runtime_error("direct COFF backend encountered unsupported static floating initializer");
+    }
+
     std::string stringLiteralSymbol(const std::string &value) {
         const auto found = stringSymbols.find(value);
         if (found != stringSymbols.end()) {
@@ -356,8 +402,40 @@ private:
         return symbol;
     }
 
+    std::string floatLiteralSymbol(double value, bool isFloat32) {
+        if (isFloat32) {
+            const float narrowed = static_cast<float>(value);
+            std::uint32_t bits = 0;
+            std::memcpy(&bits, &narrowed, sizeof(bits));
+            const auto found = float32Symbols.find(bits);
+            if (found != float32Symbols.end()) {
+                return found->second;
+            }
+            const std::string symbol = ".rf32_" + std::to_string(nextFloat32Id++);
+            const std::uint32_t offset = appendSectionBytes(*rdata, 4, 4);
+            addOrUpdateSymbol(symbol, ReadOnlyDataSectionIndex, offset, ObjectSymbolBinding::Local);
+            patchLittleEndian(rdata->bytes, offset, bits, 4);
+            float32Symbols.emplace(bits, symbol);
+            return symbol;
+        }
+
+        std::uint64_t bits = 0;
+        std::memcpy(&bits, &value, sizeof(bits));
+        const auto found = float64Symbols.find(bits);
+        if (found != float64Symbols.end()) {
+            return found->second;
+        }
+        const std::string symbol = ".rf64_" + std::to_string(nextFloat64Id++);
+        const std::uint32_t offset = appendSectionBytes(*rdata, 8, 8);
+        addOrUpdateSymbol(symbol, ReadOnlyDataSectionIndex, offset, ObjectSymbolBinding::Local);
+        patchLittleEndian(rdata->bytes, offset, static_cast<long long>(bits), 8);
+        float64Symbols.emplace(bits, symbol);
+        return symbol;
+    }
+
     void emitFunction(const Function &function) {
         ensureSupportedFunction(function);
+        currentFunctionReturnType = function.returnType.get();
         addOrUpdateSymbol(functionSymbolName(function.name), TextSectionIndex, currentTextOffset(), ObjectSymbolBinding::Global);
 
         labelOffsets.clear();
@@ -388,14 +466,23 @@ private:
     void spillParameters(const Function &function) {
         for (std::size_t i = 0; i < function.parameters.size(); ++i) {
             if (i < 4) {
-                emitStoreToLocalSlot(*function.parameters[i].type, function.parameters[i].stackOffset, parameterRegister(i));
+                if (function.parameters[i].type->isFloating()) {
+                    emitStoreXmmToLocalSlot(*function.parameters[i].type, function.parameters[i].stackOffset, parameterXmmRegister(i));
+                } else {
+                    emitStoreToLocalSlot(*function.parameters[i].type, function.parameters[i].stackOffset, parameterRegister(i));
+                }
                 continue;
             }
-            emitLoadRegisterFromStackArgument(*function.parameters[i].type, RegisterCode::Rax, static_cast<int>(i));
-            if (function.parameters[i].type->kind == TypeKind::Bool) {
-                emitNormalizeBoolInRax();
+            if (function.parameters[i].type->isFloating()) {
+                emitLoadXmmFromStackArgument(*function.parameters[i].type, XmmRegister::Xmm0, static_cast<int>(i));
+                emitStoreXmmToLocalSlot(*function.parameters[i].type, function.parameters[i].stackOffset, XmmRegister::Xmm0);
+            } else {
+                emitLoadRegisterFromStackArgument(*function.parameters[i].type, RegisterCode::Rax, static_cast<int>(i));
+                if (function.parameters[i].type->kind == TypeKind::Bool) {
+                    emitNormalizeBoolInRax();
+                }
+                emitStoreToLocalSlot(*function.parameters[i].type, function.parameters[i].stackOffset, RegisterCode::Rax);
             }
-            emitStoreToLocalSlot(*function.parameters[i].type, function.parameters[i].stackOffset, RegisterCode::Rax);
         }
     }
 
@@ -412,8 +499,11 @@ private:
             const auto &returnStmt = static_cast<const ReturnStmt &>(stmt);
             if (returnStmt.expr) {
                 emitExpr(*returnStmt.expr);
+                if (currentFunctionReturnType) {
+                    emitValueConversion(*returnStmt.expr->type, *currentFunctionReturnType);
+                }
             } else {
-                emitBytes({0x31, 0xC0});
+                emitZeroResult(currentFunctionReturnType ? *currentFunctionReturnType : *Type::makeInt());
             }
             emitJump(currentReturnLabel);
             return;
@@ -430,13 +520,18 @@ private:
             }
             if (decl.init) {
                 emitExpr(*decl.init);
+                emitValueConversion(*decl.init->type, *decl.type);
             } else {
                 emitZeroResult(*decl.type);
             }
             if (decl.type->kind == TypeKind::Bool) {
                 emitNormalizeBoolInRax();
             }
-            emitStoreToLocalSlot(*decl.type, decl.stackOffset, RegisterCode::Rax);
+            if (decl.type->isFloating()) {
+                emitStoreXmmToLocalSlot(*decl.type, decl.stackOffset, XmmRegister::Xmm0);
+            } else {
+                emitStoreToLocalSlot(*decl.type, decl.stackOffset, RegisterCode::Rax);
+            }
             return;
         }
         case Stmt::Kind::Block: {
@@ -546,6 +641,8 @@ private:
             emitIndexExpr(static_cast<const IndexExpr &>(expr));
             return;
         case Expr::Kind::FloatNumber:
+            emitFloatLiteralExpr(static_cast<const FloatExpr &>(expr), *expr.type);
+            return;
         case Expr::Kind::InitializerList:
             throw std::runtime_error("direct COFF backend encountered unsupported expression");
         }
@@ -600,6 +697,10 @@ private:
     }
 
     void emitBinaryExpr(const BinaryExpr &expr) {
+        if (expr.left->type->decay()->isFloating() || expr.right->type->decay()->isFloating()) {
+            emitFloatingBinaryExpr(expr);
+            return;
+        }
         if (expr.op == BinaryOp::LogicalAnd) {
             const int falseLabel = createLabel();
             const int endLabel = createLabel();
@@ -726,11 +827,16 @@ private:
         emitAddress(*expr.target);
         emitPush(RegisterCode::Rax);
         emitExpr(*expr.value);
+        emitValueConversion(*expr.value->type, *expr.target->type);
         if (expr.target->type->kind == TypeKind::Bool) {
             emitNormalizeBoolInRax();
         }
         emitPop(RegisterCode::Rcx);
-        emitStoreToAddress(*expr.target->type, RegisterCode::Rcx, RegisterCode::Rax);
+        if (expr.target->type->isFloating()) {
+            emitStoreXmmToAddress(*expr.target->type, RegisterCode::Rcx, XmmRegister::Xmm0);
+        } else {
+            emitStoreToAddress(*expr.target->type, RegisterCode::Rcx, RegisterCode::Rax);
+        }
     }
 
     void emitCallExpr(const CallExpr &expr) {
@@ -740,16 +846,25 @@ private:
         for (std::size_t i = 0; i < expr.arguments.size(); ++i) {
             ensureSupportedScalarType(*expr.arguments[i]->type->decay(), "call argument");
             emitExpr(*expr.arguments[i]);
+            emitValueConversion(*expr.arguments[i]->type, *expr.parameterTypes[i]);
             if (expr.parameterTypes[i]->kind == TypeKind::Bool) {
                 emitNormalizeBoolInRax();
             }
-            emitStoreToRspSlot(*expr.parameterTypes[i], static_cast<int>(i * 8));
+            if (expr.parameterTypes[i]->isFloating()) {
+                emitStoreXmmToRspSlot(*expr.parameterTypes[i], static_cast<int>(i * 8), XmmRegister::Xmm0);
+            } else {
+                emitStoreToRspSlot(*expr.parameterTypes[i], static_cast<int>(i * 8));
+            }
         }
         for (std::size_t i = 0; i < expr.arguments.size(); ++i) {
             if (i >= 4) {
                 break;
             }
-            emitLoadRegisterFromRspSlot(*expr.parameterTypes[i], parameterRegister(i), static_cast<int>(i * 8));
+            if (expr.parameterTypes[i]->isFloating()) {
+                emitLoadXmmFromRspSlot(*expr.parameterTypes[i], parameterXmmRegister(i), static_cast<int>(i * 8));
+            } else {
+                emitLoadRegisterFromRspSlot(*expr.parameterTypes[i], parameterRegister(i), static_cast<int>(i * 8));
+            }
         }
         if (expr.callee->kind == Expr::Kind::Variable) {
             const auto &callee = static_cast<const VariableExpr &>(*expr.callee);
@@ -902,6 +1017,11 @@ private:
     }
 
     void emitCompareZero(const Type &type) {
+        if (type.isFloating()) {
+            emitZeroXmm(XmmRegister::Xmm1, type);
+            emitCompareXmm(type, XmmRegister::Xmm0, XmmRegister::Xmm1);
+            return;
+        }
         if (type.isPointer()) {
             emitBytes({0x48, 0x83, 0xF8, 0x00});
             return;
@@ -918,6 +1038,10 @@ private:
     }
 
     void emitCompareRegisters(const Type &type) {
+        if (type.isFloating()) {
+            emitCompareXmm(type, XmmRegister::Xmm0, XmmRegister::Xmm1);
+            return;
+        }
         if (type.isPointer() || type.valueSize() > 4) {
             emitBytes({0x48, 0x39, 0xC8});
             return;
@@ -926,6 +1050,10 @@ private:
     }
 
     void emitAddForType(const Type &type) {
+        if (type.isFloating()) {
+            emitFloatArithmetic(type, 0x58);
+            return;
+        }
         if (type.isPointer() || type.valueSize() > 4) {
             emitAddForPointerArithmetic();
             return;
@@ -938,6 +1066,10 @@ private:
     }
 
     void emitSubtractForType(const Type &type) {
+        if (type.isFloating()) {
+            emitFloatArithmetic(type, 0x5C);
+            return;
+        }
         if (type.isPointer() || type.valueSize() > 4) {
             emitBytes({0x48, 0x29, 0xC8});
             return;
@@ -949,6 +1081,10 @@ private:
         if (type.isPointer()) {
             throw std::runtime_error("direct COFF backend does not support pointer multiplication");
         }
+        if (type.isFloating()) {
+            emitFloatArithmetic(type, 0x59);
+            return;
+        }
         if (type.valueSize() > 4) {
             emitBytes({0x48, 0x0F, 0xAF, 0xC1});
             return;
@@ -959,6 +1095,10 @@ private:
     void emitDivideForType(const Type &type) {
         if (type.isPointer()) {
             throw std::runtime_error("direct COFF backend does not support pointer division");
+        }
+        if (type.isFloating()) {
+            emitFloatArithmetic(type, 0x5E);
+            return;
         }
         if (type.isUnsignedInteger()) {
             emitBytes({0x31, 0xD2});
@@ -982,6 +1122,10 @@ private:
     }
 
     void emitZeroResult(const Type &type) {
+        if (type.isFloating()) {
+            emitZeroXmm(XmmRegister::Xmm0, type);
+            return;
+        }
         if (type.isPointer() || type.valueSize() > 4) {
             emitBytes({0x48, 0x31, 0xC0});
             return;
@@ -996,6 +1140,12 @@ private:
     }
 
     void emitNegForType(const Type &type) {
+        if (type.isFloating()) {
+            emitZeroXmm(XmmRegister::Xmm1, type);
+            emitFloatArithmetic(type, 0x5C, XmmRegister::Xmm1, XmmRegister::Xmm0);
+            emitMoveXmm(type, XmmRegister::Xmm0, XmmRegister::Xmm1);
+            return;
+        }
         if (type.isPointer() || type.valueSize() > 4) {
             emitBytes({0x48, 0xF7, 0xD8});
             return;
@@ -1006,6 +1156,10 @@ private:
     void emitLoadFromAddress(const Type &type) {
         if (type.isPointer()) {
             emitLoadRegisterFromMemory(RegisterCode::Rax, RegisterCode::Rax, 8, false);
+            return;
+        }
+        if (type.isFloating()) {
+            emitLoadXmmFromMemory(type, XmmRegister::Xmm0, RegisterCode::Rax, 0);
             return;
         }
 
@@ -1047,6 +1201,10 @@ private:
         emitStoreToMemory(type, RegisterCode::Rbp, -stackOffset, source);
     }
 
+    void emitStoreXmmToLocalSlot(const Type &type, int stackOffset, XmmRegister source) {
+        emitStoreXmmToMemory(type, RegisterCode::Rbp, -stackOffset, source);
+    }
+
     void emitStoreToLocalArrayElement(const Type &type, int baseOffset, int index, RegisterCode source) {
         const int elementOffset = index * type.valueSize();
         emitStoreToMemory(type, RegisterCode::Rbp, -(baseOffset - elementOffset), source);
@@ -1056,19 +1214,39 @@ private:
         emitStoreToMemory(type, RegisterCode::Rsp, offset, RegisterCode::Rax);
     }
 
+    void emitStoreXmmToRspSlot(const Type &type, int offset, XmmRegister source) {
+        emitStoreXmmToMemory(type, RegisterCode::Rsp, offset, source);
+    }
+
     void emitLoadRegisterFromRspSlot(const Type &type, RegisterCode target, int offset) {
         emitLoadRegisterFromMemory(target, RegisterCode::Rsp, storageSize(type), false, offset);
+    }
+
+    void emitLoadXmmFromRspSlot(const Type &type, XmmRegister target, int offset) {
+        emitLoadXmmFromMemory(type, target, RegisterCode::Rsp, offset);
     }
 
     void emitLoadRegisterFromStackArgument(const Type &type, RegisterCode target, int argumentIndex) {
         emitLoadRegisterFromMemory(target, RegisterCode::Rbp, storageSize(type), false, 16 + argumentIndex * 8);
     }
 
+    void emitLoadXmmFromStackArgument(const Type &type, XmmRegister target, int argumentIndex) {
+        emitLoadXmmFromMemory(type, target, RegisterCode::Rbp, 16 + argumentIndex * 8);
+    }
+
     void emitStoreToAddress(const Type &type, RegisterCode addressRegister, RegisterCode source) {
         emitStoreToMemory(type, addressRegister, 0, source);
     }
 
+    void emitStoreXmmToAddress(const Type &type, RegisterCode addressRegister, XmmRegister source) {
+        emitStoreXmmToMemory(type, addressRegister, 0, source);
+    }
+
     void emitStoreToMemory(const Type &type, RegisterCode base, int displacement, RegisterCode source) {
+        if (type.isFloating()) {
+            emitStoreXmmToMemory(type, base, displacement, XmmRegister::Xmm0);
+            return;
+        }
         if (type.kind == TypeKind::Bool) {
             emitNormalizeBoolInRax();
         }
@@ -1097,6 +1275,14 @@ private:
         throw std::runtime_error("direct COFF backend encountered unsupported load width");
     }
 
+    void emitLoadXmmFromMemory(const Type &type, XmmRegister target, RegisterCode base, int displacement) {
+        emitXmmMemoryInstruction(type.kind == TypeKind::Float ? 0xF3 : 0xF2, 0x10, target, base, displacement);
+    }
+
+    void emitStoreXmmToMemory(const Type &type, RegisterCode base, int displacement, XmmRegister source) {
+        emitXmmMemoryInstruction(type.kind == TypeKind::Float ? 0xF3 : 0xF2, 0x11, source, base, displacement);
+    }
+
     void emitExtendedLoad(RegisterCode target, RegisterCode base, int displacement, std::uint8_t opcodeTail) {
         emitOptionalRex(false, needsRex(target), false, needsRex(base));
         emitByte(0x0F);
@@ -1111,6 +1297,20 @@ private:
 
     void emitLeaSymbolAddress(const std::string &symbolName) {
         emitBytes({0x48, 0x8D, 0x05});
+        const std::uint32_t displacementOffset = currentTextOffset();
+        emitU32(0);
+        model.relocations.push_back(ObjectRelocation{
+            TextSectionIndex,
+            displacementOffset,
+            symbolName,
+            ObjectRelocationKind::Rel32});
+    }
+
+    void emitLoadXmmFromSymbol(const Type &type, XmmRegister target, const std::string &symbolName) {
+        emitByte(type.kind == TypeKind::Float ? 0xF3 : 0xF2);
+        emitByte(0x0F);
+        emitByte(0x10);
+        emitByte(modRm(0x0, lowCode(target), 0x5));
         const std::uint32_t displacementOffset = currentTextOffset();
         emitU32(0);
         model.relocations.push_back(ObjectRelocation{
@@ -1229,6 +1429,183 @@ private:
         emitBytes({0x0F, 0xB6, 0xC0});
     }
 
+    void emitXmmMemoryInstruction(
+        std::uint8_t prefix,
+        std::uint8_t opcode,
+        XmmRegister reg,
+        RegisterCode base,
+        int displacement) {
+        emitByte(prefix);
+        emitOptionalRex(false, needsRex(reg), false, needsRex(base));
+        emitByte(0x0F);
+        emitByte(opcode);
+        emitAddressing(base, displacement, lowCode(reg));
+    }
+
+    void emitXmmRegInstruction(std::uint8_t prefix, std::uint8_t opcode, XmmRegister target, XmmRegister source) {
+        emitByte(prefix);
+        emitOptionalRex(false, needsRex(target), false, needsRex(source));
+        emitByte(0x0F);
+        emitByte(opcode);
+        emitByte(modRm(0x3, lowCode(target), lowCode(source)));
+    }
+
+    void emitXmmRegInstructionNoMandatoryPrefix(
+        bool use66Prefix,
+        std::uint8_t opcode,
+        XmmRegister target,
+        XmmRegister source) {
+        if (use66Prefix) {
+            emitByte(0x66);
+        }
+        emitOptionalRex(false, needsRex(target), false, needsRex(source));
+        emitByte(0x0F);
+        emitByte(opcode);
+        emitByte(modRm(0x3, lowCode(target), lowCode(source)));
+    }
+
+    void emitMoveXmm(const Type &type, XmmRegister target, XmmRegister source) {
+        emitXmmRegInstruction(type.kind == TypeKind::Float ? 0xF3 : 0xF2, 0x10, target, source);
+    }
+
+    void emitZeroXmm(XmmRegister reg, const Type &type) {
+        emitXmmRegInstructionNoMandatoryPrefix(type.kind == TypeKind::Double, 0x57, reg, reg);
+    }
+
+    void emitCompareXmm(const Type &type, XmmRegister left, XmmRegister right) {
+        emitXmmRegInstructionNoMandatoryPrefix(type.kind == TypeKind::Double, 0x2E, left, right);
+    }
+
+    void emitFloatArithmetic(const Type &type, std::uint8_t opcode, XmmRegister target = XmmRegister::Xmm0, XmmRegister source = XmmRegister::Xmm1) {
+        emitXmmRegInstruction(type.kind == TypeKind::Float ? 0xF3 : 0xF2, opcode, target, source);
+    }
+
+    void emitPushFloatValue(const Type &type) {
+        emitAdjustRsp(false, 8);
+        emitStoreXmmToMemory(type, RegisterCode::Rsp, 0, XmmRegister::Xmm0);
+    }
+
+    void emitPopFloatValue(const Type &type, XmmRegister target) {
+        emitLoadXmmFromMemory(type, target, RegisterCode::Rsp, 0);
+        emitAdjustRsp(true, 8);
+    }
+
+    void emitConvertFloatingValue(const Type &sourceType, const Type &targetType) {
+        if (!sourceType.isFloating() || !targetType.isFloating() || sourceType.kind == targetType.kind) {
+            return;
+        }
+        emitXmmRegInstruction(sourceType.kind == TypeKind::Float ? 0xF3 : 0xF2, 0x5A, XmmRegister::Xmm0, XmmRegister::Xmm0);
+    }
+
+    void emitValueConversion(const Type &sourceType, const Type &targetType) {
+        if (sourceType.equals(targetType)) {
+            return;
+        }
+        if (sourceType.isFloating() && targetType.isFloating()) {
+            emitConvertFloatingValue(sourceType, targetType);
+            return;
+        }
+        if (sourceType.isInteger() && targetType.isFloating()) {
+            emitConvertIntegerToFloat(sourceType, targetType);
+            return;
+        }
+        if (sourceType.isFloating() && targetType.isInteger()) {
+            emitConvertFloatToInteger(sourceType, targetType);
+            return;
+        }
+    }
+
+    void emitConvertIntegerToFloat(const Type &sourceType, const Type &targetType) {
+        emitByte(targetType.kind == TypeKind::Float ? 0xF3 : 0xF2);
+        emitOptionalRex(sourceType.valueSize() > 4, false, false, false);
+        emitByte(0x0F);
+        emitByte(0x2A);
+        emitByte(modRm(0x3, lowCode(XmmRegister::Xmm0), lowCode(RegisterCode::Rax)));
+    }
+
+    void emitConvertFloatToInteger(const Type &sourceType, const Type &targetType) {
+        emitByte(sourceType.kind == TypeKind::Float ? 0xF3 : 0xF2);
+        emitOptionalRex(targetType.valueSize() > 4, false, false, false);
+        emitByte(0x0F);
+        emitByte(0x2C);
+        emitByte(modRm(0x3, lowCode(RegisterCode::Rax), lowCode(XmmRegister::Xmm0)));
+    }
+
+    void emitFloatLiteralExpr(const FloatExpr &expr, const Type &type) {
+        emitLoadXmmFromSymbol(type, XmmRegister::Xmm0, floatLiteralSymbol(expr.value, type.kind == TypeKind::Float));
+    }
+
+    void emitFloatingBinaryExpr(const BinaryExpr &expr) {
+        TypePtr operandType;
+        if (expr.type->isFloating()) {
+            operandType = expr.type;
+        } else {
+            const TypePtr leftType = expr.left->type->decay();
+            const TypePtr rightType = expr.right->type->decay();
+            operandType =
+                (leftType->kind == TypeKind::Double || rightType->kind == TypeKind::Double)
+                ? Type::makeDouble()
+                : Type::makeFloat();
+        }
+
+        emitExpr(*expr.left);
+        emitValueConversion(*expr.left->type, *operandType);
+        emitPushFloatValue(*operandType);
+        emitExpr(*expr.right);
+        emitValueConversion(*expr.right->type, *operandType);
+        emitMoveXmm(*operandType, XmmRegister::Xmm1, XmmRegister::Xmm0);
+        emitPopFloatValue(*operandType, XmmRegister::Xmm0);
+
+        switch (expr.op) {
+        case BinaryOp::Add:
+            emitFloatArithmetic(*operandType, 0x58);
+            return;
+        case BinaryOp::Subtract:
+            emitFloatArithmetic(*operandType, 0x5C);
+            return;
+        case BinaryOp::Multiply:
+            emitFloatArithmetic(*operandType, 0x59);
+            return;
+        case BinaryOp::Divide:
+            emitFloatArithmetic(*operandType, 0x5E);
+            return;
+        case BinaryOp::Equal:
+        case BinaryOp::NotEqual:
+        case BinaryOp::Less:
+        case BinaryOp::LessEqual:
+        case BinaryOp::Greater:
+        case BinaryOp::GreaterEqual:
+            emitCompareXmm(*operandType, XmmRegister::Xmm0, XmmRegister::Xmm1);
+            switch (expr.op) {
+            case BinaryOp::Equal:
+                emitSetCcToAl(ConditionCode::Equal);
+                break;
+            case BinaryOp::NotEqual:
+                emitSetCcToAl(ConditionCode::NotEqual);
+                break;
+            case BinaryOp::Less:
+                emitSetCcToAl(ConditionCode::Below);
+                break;
+            case BinaryOp::LessEqual:
+                emitSetCcToAl(ConditionCode::BelowEqual);
+                break;
+            case BinaryOp::Greater:
+                emitSetCcToAl(ConditionCode::Above);
+                break;
+            case BinaryOp::GreaterEqual:
+                emitSetCcToAl(ConditionCode::AboveEqual);
+                break;
+            default:
+                break;
+            }
+            emitMovzxEaxAl();
+            return;
+        case BinaryOp::LogicalAnd:
+        case BinaryOp::LogicalOr:
+            return;
+        }
+    }
+
     void emitMemoryRegInstruction(
         std::uint8_t opcode,
         RegisterCode base,
@@ -1283,7 +1660,15 @@ private:
         return static_cast<std::uint8_t>(reg) & 0x7;
     }
 
+    static std::uint8_t lowCode(XmmRegister reg) {
+        return static_cast<std::uint8_t>(reg) & 0x7;
+    }
+
     static bool needsRex(RegisterCode reg) {
+        return static_cast<std::uint8_t>(reg) >= 8;
+    }
+
+    static bool needsRex(XmmRegister reg) {
         return static_cast<std::uint8_t>(reg) >= 8;
     }
 
@@ -1303,6 +1688,21 @@ private:
             return RegisterCode::R9;
         default:
             throw std::runtime_error("direct COFF backend internal error: invalid parameter register");
+        }
+    }
+
+    static XmmRegister parameterXmmRegister(std::size_t index) {
+        switch (index) {
+        case 0:
+            return XmmRegister::Xmm0;
+        case 1:
+            return XmmRegister::Xmm1;
+        case 2:
+            return XmmRegister::Xmm2;
+        case 3:
+            return XmmRegister::Xmm3;
+        default:
+            throw std::runtime_error("direct COFF backend internal error: invalid XMM parameter register");
         }
     }
 
@@ -1402,6 +1802,8 @@ private:
     ObjectSection *bss = nullptr;
     std::unordered_map<std::string, std::size_t> symbolIndexes;
     std::unordered_map<std::string, std::string> stringSymbols;
+    std::unordered_map<std::uint32_t, std::string> float32Symbols;
+    std::unordered_map<std::uint64_t, std::string> float64Symbols;
     std::unordered_map<int, std::uint32_t> labelOffsets;
     std::vector<PendingJumpPatch> pendingJumps;
     std::vector<int> loopBreakLabels;
@@ -1409,6 +1811,9 @@ private:
     int nextLabelId = 1;
     int currentReturnLabel = 0;
     int nextStringId = 0;
+    int nextFloat32Id = 0;
+    int nextFloat64Id = 0;
+    const Type *currentFunctionReturnType = nullptr;
 };
 
 } // namespace

@@ -317,6 +317,280 @@ if (WIN32)
     )
 
     add_minic_regression_test(
+        minic_import_kernel32_pid_direct_coff
+        SOURCES input/tmp_import_kernel32_pid.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_import_kernel32_pid_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_import_kernel32_pid_direct_coff.exe
+        EXPECTED_EXIT 1
+        LABELS regression phase-current coff windows imports
+    )
+
+    add_minic_regression_test(
+        minic_import_file_backed_direct_coff
+        SOURCES input/tmp_import_file_backed.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_import_file_backed_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_import_file_backed_direct_coff.exe
+        EXPECTED_EXIT 5
+        LABELS regression phase-current coff windows imports
+    )
+
+    add_minic_regression_test(
+        minic_reloc_probe_function_ptr_direct_coff
+        SOURCES input/tmp_reloc_probe_function_ptr.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_reloc_probe_function_ptr_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_reloc_probe_function_ptr_direct_coff.exe
+        EXPECTED_EXIT 42
+        RELOC_PROBE build/Debug/pe_reloc_probe.exe
+        RELOC_PROBE_ARGS --expect-reloc yes --delta 0x100000 --site 0x2000=0x1000
+        LABELS regression phase-current coff windows relocations rebasing
+    )
+
+    add_minic_regression_test(
+        minic_reloc_probe_string_ptr_direct_coff
+        SOURCES input/tmp_reloc_probe_string_ptr.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_reloc_probe_string_ptr_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_reloc_probe_string_ptr_direct_coff.exe
+        EXPECTED_EXIT 65
+        RELOC_PROBE build/Debug/pe_reloc_probe.exe
+        RELOC_PROBE_ARGS --expect-reloc yes --delta 0x100000 --site 0x2000=0x3000
+        LABELS regression phase-current coff windows relocations rebasing
+    )
+
+    add_minic_regression_test(
+        minic_reloc_probe_global_ptr_direct_coff
+        SOURCES input/tmp_reloc_probe_global_ptr.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_reloc_probe_global_ptr_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_reloc_probe_global_ptr_direct_coff.exe
+        EXPECTED_EXIT 42
+        RELOC_PROBE build/Debug/pe_reloc_probe.exe
+        RELOC_PROBE_ARGS --expect-reloc yes --delta 0x100000 --site 0x2000=0x3000
+        LABELS regression phase-current coff windows relocations rebasing
+    )
+
+    add_minic_regression_test(
+        minic_reloc_no_absolute_data_direct_coff
+        SOURCES input/tmp_reloc_no_absolute_data.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_reloc_no_absolute_data_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_reloc_no_absolute_data_direct_coff.exe
+        EXPECTED_EXIT 7
+        RELOC_PROBE build/Debug/pe_reloc_probe.exe
+        RELOC_PROBE_ARGS --expect-reloc no
+        LABELS regression phase-current coff windows relocations rebasing
+    )
+
+    add_minic_regression_test(
+        minic_import_unresolved_direct_coff
+        SOURCES input/tmp_import_unresolved.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_import_unresolved_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_import_unresolved_direct_coff.exe
+        EXPECTED_EXIT 0
+        ERROR_MARKERS "unresolved external symbol:" "invoking standalone minic-link failed"
+        LABELS regression phase-current coff windows imports linker-failures
+    )
+
+    add_minic_regression_test(
+        minic_import_catalog_bad_row_direct_coff
+        SOURCES input/answer.c
+        COMPILER_ARGS --windows-obj-backend;coff;--link-trace;-o;REPO:build/output/tmp_import_catalog_bad_row_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_import_catalog_bad_row_direct_coff.exe
+        EXPECTED_EXIT 0
+        CATALOG_FIXTURE tests/data/import_catalog_bad_row.txt
+        ERROR_MARKERS "invalid import catalog row"
+        LABELS regression phase-current coff windows imports linker-failures
+    )
+
+    add_minic_regression_test(
+        minic_import_catalog_duplicate_symbol_direct_coff
+        SOURCES input/answer.c
+        COMPILER_ARGS --windows-obj-backend;coff;--link-trace;-o;REPO:build/output/tmp_import_catalog_duplicate_symbol_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_import_catalog_duplicate_symbol_direct_coff.exe
+        EXPECTED_EXIT 0
+        CATALOG_FIXTURE tests/data/import_catalog_duplicate_symbol.txt
+        ERROR_MARKERS "duplicate import catalog symbol" "fn_strlen"
+        LABELS regression phase-current coff windows imports linker-failures
+    )
+
+    add_minic_regression_test(
+        minic_import_catalog_duplicate_builtin_direct_coff
+        SOURCES input/answer.c
+        COMPILER_ARGS --windows-obj-backend;coff;--link-trace;-o;REPO:build/output/tmp_import_catalog_duplicate_builtin_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_import_catalog_duplicate_builtin_direct_coff.exe
+        EXPECTED_EXIT 0
+        CATALOG_FIXTURE tests/data/import_catalog_duplicate_builtin.txt
+        ERROR_MARKERS "may not override built-in symbol" "fn_puts"
+        LABELS regression phase-current coff windows imports linker-failures
+    )
+
+    add_minic_regression_test(
+        minic_longlong_compare_direct_coff
+        SOURCES input/tmp_longlong_compare.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_longlong_compare_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_longlong_compare_direct_coff.exe
+        EXPECTED_EXIT 42
+        LABELS regression phase-current coff windows semantics
+    )
+
+    add_minic_regression_test(
+        minic_longlong_divide_direct_coff
+        SOURCES input/tmp_longlong_divide.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_longlong_divide_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_longlong_divide_direct_coff.exe
+        EXPECTED_EXIT 42
+        LABELS regression phase-current coff windows semantics
+    )
+
+    add_minic_regression_test(
+        minic_unsigned_compare_direct_coff
+        SOURCES input/tmp_unsigned_compare.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_unsigned_compare_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_unsigned_compare_direct_coff.exe
+        EXPECTED_EXIT 42
+        LABELS regression phase-current coff windows semantics
+    )
+
+    add_minic_regression_test(
+        minic_bool_normalize_direct_coff
+        SOURCES input/tmp_bool_normalize.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_bool_normalize_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_bool_normalize_direct_coff.exe
+        EXPECTED_EXIT 1
+        LABELS regression phase-current coff windows semantics
+    )
+
+    add_minic_regression_test(
+        minic_double_math_direct_coff
+        SOURCES input/tmp_double_math.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_double_math_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_double_math_direct_coff.exe
+        EXPECTED_EXIT 42
+        LABELS regression phase-current coff windows semantics floating
+    )
+
+    add_minic_regression_test(
+        minic_float_math_direct_coff
+        SOURCES input/tmp_float_math.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_float_math_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_float_math_direct_coff.exe
+        EXPECTED_EXIT 42
+        LABELS regression phase-current coff windows semantics floating
+    )
+
+    add_minic_regression_test(
+        minic_mixed_int_double_direct_coff
+        SOURCES input/tmp_mixed_int_double.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_mixed_int_double_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_mixed_int_double_direct_coff.exe
+        EXPECTED_EXIT 42
+        LABELS regression phase-current coff windows semantics floating
+    )
+
+    add_minic_regression_test(
+        minic_double_to_int_return_direct_coff
+        SOURCES input/tmp_double_to_int_return.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_double_to_int_return_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_double_to_int_return_direct_coff.exe
+        EXPECTED_EXIT 42
+        LABELS regression phase-current coff windows semantics floating
+    )
+
+    add_minic_regression_test(
+        minic_global_int_array_direct_coff
+        SOURCES input/tmp_else.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_else_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_else_direct_coff.exe
+        EXPECTED_EXIT 42
+        LABELS regression phase-current coff windows initializers
+    )
+
+    add_minic_regression_test(
+        minic_import_mixed_showcase_direct_coff
+        SOURCES input/tmp_import_mixed_showcase.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_import_mixed_showcase_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_import_mixed_showcase_direct_coff.exe
+        EXPECTED_EXIT 1
+        LABELS regression phase-current coff windows imports
+    )
+
+    add_minic_regression_test(
+        minic_import_putchar_direct_coff
+        SOURCES input/tmp_import_putchar.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_import_putchar_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_import_putchar_direct_coff.exe
+        EXPECTED_EXIT 1
+        LABELS regression phase-current coff windows imports
+    )
+
+    add_minic_regression_test(
+        minic_bad_arity_direct_coff
+        SOURCES input/tmp_bad_arity.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_bad_arity_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_bad_arity_direct_coff.exe
+        EXPECTED_EXIT 0
+        ERROR_MARKERS "wrong number of arguments in function call"
+        LABELS regression phase-current coff windows semantics
+    )
+
+    add_minic_regression_test(
+        minic_bad_argument_type_direct_coff
+        SOURCES input/tmp_cross_no_decl_main.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_cross_no_decl_main_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_cross_no_decl_main_direct_coff.exe
+        EXPECTED_EXIT 0
+        ERROR_MARKERS "argument type mismatch in function call"
+        LABELS regression phase-current coff windows semantics
+    )
+
+    add_minic_regression_test(
+        minic_bad_return_type_direct_coff
+        SOURCES input/tmp_bad_void_var.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_bad_void_var_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_bad_void_var_direct_coff.exe
+        EXPECTED_EXIT 0
+        ERROR_MARKERS "return type mismatch"
+        LABELS regression phase-current coff windows semantics
+    )
+
+    add_minic_regression_test(
+        minic_array_too_many_elements_direct_coff
+        SOURCES input/tmp_bss_global_int.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_bss_global_int_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_bss_global_int_direct_coff.exe
+        EXPECTED_EXIT 0
+        ERROR_MARKERS "too many elements in global array initializer"
+        LABELS regression phase-current coff windows initializers
+    )
+
+    add_minic_regression_test(
+        minic_array_bad_element_type_direct_coff
+        SOURCES input/tmp_ptr_add.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_ptr_add_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_ptr_add_direct_coff.exe
+        EXPECTED_EXIT 0
+        ERROR_MARKERS "array initializer element type mismatch"
+        LABELS regression phase-current coff windows initializers
+    )
+
+    add_minic_regression_test(
+        minic_local_ptr_array_invalid_source_direct_coff
+        SOURCES input/tmp_bss_global_array.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_bss_global_array_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_bss_global_array_direct_coff.exe
+        EXPECTED_EXIT 0
+        ERROR_MARKERS "local pointer array initializers currently support only function names"
+        LABELS regression phase-current coff windows initializers
+    )
+
+    add_minic_regression_test(
+        minic_function_ptr_invalid_init_direct_coff
+        SOURCES input/tmp_function_ptr_invalid_init.c
+        COMPILER_ARGS --windows-obj-backend;coff;-o;REPO:build/output/tmp_function_ptr_invalid_init_direct_coff.exe
+        OUTPUT_EXE build/output/tmp_function_ptr_invalid_init_direct_coff.exe
+        EXPECTED_EXIT 0
+        ERROR_MARKERS "function names"
+        LABELS regression phase-current coff windows relocations
+    )
+
+    add_minic_regression_test(
         minic_local_string_init
         SOURCES input/tmp_string_local.c
         OUTPUT_EXE build/output/tmp_string_local.exe
@@ -638,7 +912,7 @@ if (WIN32)
         EXPECTED_EXIT 42
         TRACE_MARKERS "[link] input objects" "[link] merged sections" "[link] resolved symbols" "[link] relocations"
         OUTPUT_MARKERS "symbol gv_value" "symbol fn_read_global_through_abs" "section=.text" "type=ADDR64"
-        LABELS regression phase-current relocations
+        LABELS regression phase-current relocations nasm-only external-object
     )
 
     add_minic_regression_test(
@@ -648,7 +922,7 @@ if (WIN32)
         OUTPUT_EXE build/output/tmp_link_duplicate.exe
         EXPECTED_EXIT 0
         ERROR_MARKERS "duplicate external symbol: fn_dupe"
-        LABELS regression phase-current linker-failures
+        LABELS regression phase-current linker-failures nasm-only external-object
     )
 
     add_minic_regression_test(
@@ -658,7 +932,7 @@ if (WIN32)
         OUTPUT_EXE build/output/tmp_link_bad_reloc.exe
         EXPECTED_EXIT 0
         ERROR_MARKERS "unsupported COFF" "section .text"
-        LABELS regression phase-current linker-failures
+        LABELS regression phase-current linker-failures nasm-only external-object
     )
 
     add_minic_regression_test(
@@ -668,7 +942,7 @@ if (WIN32)
         OUTPUT_EXE build/output/tmp_link_bad_section.exe
         EXPECTED_EXIT 0
         ERROR_MARKERS "linker diagnostic:" ".pdata"
-        LABELS regression phase-current linker-failures
+        LABELS regression phase-current linker-failures nasm-only external-object
     )
 
     add_minic_regression_test(
@@ -813,7 +1087,7 @@ if (WIN32)
         OUTPUT_EXE build/output/linux_rejects_windows_obj
         EXPECTED_EXIT 0
         ERROR_MARKERS "target x86_64-linux only accepts ELF .o object inputs for final linking"
-        LABELS regression phase-current linux linux-link linker-failures
+        LABELS regression phase-current linux linux-link linker-failures nasm-only external-object
     )
 
     add_minic_regression_test(
@@ -823,7 +1097,7 @@ if (WIN32)
         OUTPUT_EXE build/output/tmp_invalid_small.exe
         EXPECTED_EXIT 0
         ERROR_MARKERS "linker diagnostic:" "object file is too small"
-        LABELS regression phase-current linker-failures
+        LABELS regression phase-current linker-failures external-object
     )
 
     add_minic_regression_test(
@@ -833,7 +1107,7 @@ if (WIN32)
         OUTPUT_EXE build/output/tmp_link_missing_entry.exe
         EXPECTED_EXIT 0
         ERROR_MARKERS "missing entry symbol: mainCRTStartup" "defines main"
-        LABELS regression phase-current linker-failures
+        LABELS regression phase-current linker-failures nasm-only external-object
     )
 
     add_minic_regression_test(
@@ -843,6 +1117,6 @@ if (WIN32)
         OUTPUT_EXE build/output/tmp_link_data_only.exe
         EXPECTED_EXIT 0
         ERROR_MARKERS "linked objects do not contain a .text section"
-        LABELS regression phase-current linker-failures
+        LABELS regression phase-current linker-failures nasm-only external-object
     )
 endif()

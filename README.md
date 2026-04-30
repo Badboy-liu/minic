@@ -130,7 +130,19 @@ On Windows, the experimental direct object path is also available:
 .\build\Debug\minic.exe .\input\answer.c --windows-obj-backend coff -o .\build\output\answer_direct_coff.exe
 ```
 
-That path already covers a useful teaching subset, including multi-file integer code, stack-passed integer arguments, simple globals in `.data` / `.bss`, global pointer initializers, and basic imported calls like `puts`. It does **not** fully replace `nasm` yet: some existing Windows features still only work through the NASM backend, and Linux still uses the NASM/ELF path today.
+That path already covers a useful teaching subset, including:
+
+- multi-file integer code
+- Windows x64 stack-passed integer arguments
+- simple globals in `.data` / `.bss`
+- global pointer initializers
+- basic imported calls such as `puts`, `putchar`, `printf`, and `GetCurrentProcessId`
+- the current teaching subset of `float` / `double` parameters, returns, literals, arithmetic, comparison, and integer/floating conversion on the Windows path
+
+It does **not** fully replace `nasm` yet. The main remaining `nasm`-backed Windows tests are now concentrated in two categories:
+
+- hand-written `.asm` / external `.obj` interoperability cases that are intentionally kept to validate linker behavior with non-`minic` object producers
+- Linux NASM/ELF paths, which are still separate from the Windows direct COFF work
 
 Global variables are emitted into `.data` when initialized and `.bss` when they are uninitialized/tentative definitions. The built-in PE linker preserves section-relative offsets for NASM COFF `REL32` relocations, so multiple globals placed in `.bss` keep distinct addresses in the final executable. It also supports the current compiler's minimal `.data` `ADDR64` relocation path for global pointer initializers such as `int *p = &x;`, `char *p = "A";`, `int (*fn_ptr)() = answer;`, and `int (*fn_table[2])() = { one, two };`. It now also supports the current teaching subset of `.text` `ADDR64` relocations, which makes small hand-written NASM helper objects linkable on the Windows path. For supported absolute-address sites, the linker now also synthesizes a PE `.reloc` section with `DIR64` base relocations, so those executables remain correct after rebasing instead of relying on a fixed preferred image base.
 
@@ -179,6 +191,12 @@ ctest --preset imports
 ```
 
 The file-backed import case is part of that preset and uses the repository catalog under `config/import_catalog.txt`.
+
+Fastest way to run only the Windows direct COFF teaching cases:
+
+```powershell
+ctest --test-dir .\build -C Debug -L coff --output-on-failure
+```
 
 Fastest way to run only the relocation teaching cases:
 
@@ -289,6 +307,12 @@ To run only the DLL-aware import regressions:
 ctest --preset imports
 ```
 
+To run only the Windows direct COFF regressions:
+
+```powershell
+ctest --test-dir .\build -C Debug -L coff --output-on-failure
+```
+
 To run only the relocation-focused regressions:
 
 ```powershell
@@ -315,6 +339,6 @@ Current limits:
 - no general non-constant global initializers beyond function names, `&function`, `&global_object`, and string-literal pointer forms
 - no general aggregate initialization beyond the currently supported one-dimensional integer/pointer array subsets
 - no structs
-- no full mixed integer/floating implicit conversion support yet
+- no full ISO C floating-point and mixed arithmetic conversion coverage yet; the current support is the teaching subset exercised by the regression suite
 - no full ISO C usual arithmetic conversions; integer compatibility follows the compiler's current teaching-oriented widening rules
 - Linux executable linking depends on a working WSL distribution with `gcc`; this is a system-linker integration, not an in-process ELF linker
