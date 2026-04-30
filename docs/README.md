@@ -13,6 +13,7 @@ If you are new to the repository, read in this order:
 2. [project-status-overview.md](project-status-overview.md)
 3. [pe-coff-linker-support.md](pe-coff-linker-support.md)
 4. [minic-relocation-matrix.md](minic-relocation-matrix.md)
+5. [testing-commands.md](testing-commands.md)
 
 ## Long-Lived Documentation
 
@@ -26,6 +27,8 @@ These files describe the project as it exists today and should stay useful over 
   Current PE/COFF linker model, boundaries, trace output, and regression entry points.
 - [minic-relocation-matrix.md](minic-relocation-matrix.md)
   Which relocation shapes the current `minic` pipeline can generate today, what is already supported, and which future C features will force new relocation work.
+- [testing-commands.md](testing-commands.md)
+  Central reference for CTest presets, labels, and every current named regression case.
 
 ## Process Documentation
 

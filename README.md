@@ -18,6 +18,7 @@ Primary docs:
 - [Project Status Overview](docs/project-status-overview.md)
 - [PE/COFF Linker Support](docs/pe-coff-linker-support.md)
 - [minic Relocation Matrix](docs/minic-relocation-matrix.md)
+- [Testing Commands](docs/testing-commands.md)
 
 Document types:
 
