@@ -120,15 +120,31 @@ Or invoke the linker directly once objects already exist:
 
 Each input file is compiled into its own NASM assembly file and object file. The built-in PE linker then resolves external function symbols across those objects, so functions defined in one `.c` file can be called from another `.c` file.
 
-Global variables are emitted into `.data` when initialized and `.bss` when they are uninitialized/tentative definitions. The built-in PE linker preserves section-relative offsets for NASM COFF `REL32` relocations, so multiple globals placed in `.bss` keep distinct addresses in the final executable. It also supports the current compiler's minimal `.data` `ADDR64` relocation path for global pointer initializers such as `int *p = &x;`, `char *p = "A";`, `int (*fn_ptr)() = answer;`, and `int (*fn_table[2])() = { one, two };`. It now also supports the current teaching subset of `.text` `ADDR64` relocations, which makes small hand-written NASM helper objects linkable on the Windows path.
+Global variables are emitted into `.data` when initialized and `.bss` when they are uninitialized/tentative definitions. The built-in PE linker preserves section-relative offsets for NASM COFF `REL32` relocations, so multiple globals placed in `.bss` keep distinct addresses in the final executable. It also supports the current compiler's minimal `.data` `ADDR64` relocation path for global pointer initializers such as `int *p = &x;`, `char *p = "A";`, `int (*fn_ptr)() = answer;`, and `int (*fn_table[2])() = { one, two };`. It now also supports the current teaching subset of `.text` `ADDR64` relocations, which makes small hand-written NASM helper objects linkable on the Windows path. For supported absolute-address sites, the linker now also synthesizes a PE `.reloc` section with `DIR64` base relocations, so those executables remain correct after rebasing instead of relying on a fixed preferred image base.
 
-The linker now also supports a small teaching-oriented import map across multiple DLLs. Today that includes:
+The linker now also supports a small table-driven import catalog across multiple DLLs. Today that includes these built-in entries:
 
 - `kernel32.dll!ExitProcess`
 - `kernel32.dll!GetCurrentProcessId`
 - `msvcrt.dll!puts`
+- `msvcrt.dll!putchar`
+- `msvcrt.dll!printf`
 
-That means ordinary external declarations such as `extern int puts(char *text);` can now link through the built-in PE import machinery without adding new source syntax.
+That means ordinary external declarations such as `extern int puts(char *text);`, `extern int putchar(int ch);`, and conservative simple `printf` calls can now link through the built-in PE import machinery without adding new source syntax. The import source is still built into the linker today; user-defined import catalogs are not implemented yet.
+
+In addition, `minic-link` now loads an additive repository catalog from `config/import_catalog.txt` when that file exists. Each non-comment row uses:
+
+```text
+symbol|dll|import
+```
+
+For example:
+
+```text
+fn_strlen|msvcrt.dll|strlen
+```
+
+File-backed entries can extend the built-in catalog, but they cannot override built-in symbols.
 
 ## Quick Check
 
@@ -149,6 +165,8 @@ Fastest way to run only the import teaching cases:
 ```powershell
 ctest --preset imports
 ```
+
+The file-backed import case is part of that preset and uses the repository catalog under `config/import_catalog.txt`.
 
 Fastest way to run only the relocation teaching cases:
 
@@ -192,6 +210,7 @@ The trace prints:
 - import groups by DLL
 - resolved symbols
 - applied `REL32` and minimal `ADDR64` relocations
+- synthesized PE base relocations for rebasing-sensitive absolute addresses
 
 To verify multi-object PE linking:
 

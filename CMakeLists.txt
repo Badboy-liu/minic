@@ -49,6 +49,10 @@ add_executable(minic-link
     ${MINIC_CORE_SOURCES}
 )
 
+add_executable(pe_reloc_probe
+    tests/pe_reloc_probe.cpp
+)
+
 function(configure_minic_target target_name)
     target_include_directories(${target_name}
         PRIVATE
@@ -68,12 +72,13 @@ endfunction()
 
 configure_minic_target(${PROJECT_NAME})
 configure_minic_target(minic-link)
+target_compile_definitions(pe_reloc_probe PRIVATE NOMINMAX)
 
 if (WIN32)
     function(add_minic_regression_test test_name)
         set(options SKIP_RUN RUN_WITH_WSL SKIP_IF_WSL_UNAVAILABLE)
-        set(oneValueArgs EXPECTED_EXIT OUTPUT_EXE CHECK_FILE)
-        set(multiValueArgs SOURCES COMPILER_ARGS TRACE_MARKERS OUTPUT_MARKERS FILE_MARKERS ERROR_MARKERS LABELS)
+        set(oneValueArgs EXPECTED_EXIT OUTPUT_EXE CHECK_FILE RELOC_PROBE CATALOG_FIXTURE)
+        set(multiValueArgs SOURCES COMPILER_ARGS TRACE_MARKERS OUTPUT_MARKERS FILE_MARKERS ERROR_MARKERS LABELS RELOC_PROBE_ARGS)
         cmake_parse_arguments(TEST "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
 
         string(JOIN ";" source_files ${TEST_SOURCES})
@@ -82,6 +87,7 @@ if (WIN32)
         string(JOIN ";" output_markers ${TEST_OUTPUT_MARKERS})
         string(JOIN ";" file_markers ${TEST_FILE_MARKERS})
         string(JOIN ";" error_markers ${TEST_ERROR_MARKERS})
+        string(JOIN ";" reloc_probe_args ${TEST_RELOC_PROBE_ARGS})
         set(expect_compiler_failure)
         if (TEST_ERROR_MARKERS)
             set(expect_compiler_failure -ExpectCompilerFailure)
@@ -114,6 +120,9 @@ if (WIN32)
                 -RequiredOutputMarkers "${output_markers}"
                 -CheckFile "${TEST_CHECK_FILE}"
                 -RequiredFileMarkers "${file_markers}"
+                -CatalogFixture "${TEST_CATALOG_FIXTURE}"
+                -RelocProbe "${TEST_RELOC_PROBE}"
+                -RelocProbeArgs "${reloc_probe_args}"
                 ${expect_compiler_failure}
                 ${run_with_wsl}
                 ${skip_if_wsl_unavailable}
@@ -302,7 +311,7 @@ if (WIN32)
         OUTPUT_EXE build/output/tmp_import_kernel32_pid.exe
         EXPECTED_EXIT 1
         TRACE_MARKERS "[link] input objects" "[link] merged sections" "[link] imports" "[link] resolved symbols" "[link] relocations"
-        OUTPUT_MARKERS "extern fn_GetCurrentProcessId" "dll kernel32.dll: ExitProcess, fn_GetCurrentProcessId" "fn_GetCurrentProcessId ->" "dll=kernel32.dll"
+        OUTPUT_MARKERS "extern fn_GetCurrentProcessId" "dll kernel32.dll: ExitProcess (source=builtin), fn_GetCurrentProcessId (source=builtin)" "fn_GetCurrentProcessId ->" "dll=kernel32.dll" "source=builtin"
         LABELS regression phase-current imports
     )
 
@@ -324,7 +333,51 @@ if (WIN32)
         OUTPUT_EXE build/output/tmp_import_mixed_showcase.exe
         EXPECTED_EXIT 1
         TRACE_MARKERS "[link] input objects" "[link] merged sections" "[link] imports" "[link] resolved symbols" "[link] relocations"
-        OUTPUT_MARKERS "extern fn_puts" "extern fn_GetCurrentProcessId" "dll kernel32.dll: ExitProcess, fn_GetCurrentProcessId" "dll msvcrt.dll: fn_puts"
+        OUTPUT_MARKERS "extern fn_puts" "extern fn_GetCurrentProcessId" "dll kernel32.dll: ExitProcess (source=builtin), fn_GetCurrentProcessId (source=builtin)" "dll msvcrt.dll: fn_puts (source=builtin)"
+        LABELS regression phase-current imports
+    )
+
+    add_minic_regression_test(
+        minic_import_putchar
+        SOURCES input/tmp_import_putchar.c
+        COMPILER_ARGS --link-trace
+        OUTPUT_EXE build/output/tmp_import_putchar.exe
+        EXPECTED_EXIT 1
+        TRACE_MARKERS "[link] input objects" "[link] merged sections" "[link] imports" "[link] resolved symbols" "[link] relocations"
+        OUTPUT_MARKERS "extern fn_putchar" "dll msvcrt.dll: fn_putchar" "fn_putchar ->" "dll=msvcrt.dll"
+        LABELS regression phase-current imports
+    )
+
+    add_minic_regression_test(
+        minic_import_printf_simple
+        SOURCES input/tmp_import_printf_simple.c
+        COMPILER_ARGS --link-trace
+        OUTPUT_EXE build/output/tmp_import_printf_simple.exe
+        EXPECTED_EXIT 1
+        TRACE_MARKERS "[link] input objects" "[link] merged sections" "[link] imports" "[link] resolved symbols" "[link] relocations"
+        OUTPUT_MARKERS "extern fn_printf" "dll msvcrt.dll: fn_printf" "fn_printf ->" "dll=msvcrt.dll"
+        LABELS regression phase-current imports
+    )
+
+    add_minic_regression_test(
+        minic_import_msvcrt_triple
+        SOURCES input/tmp_import_msvcrt_triple.c
+        COMPILER_ARGS --link-trace
+        OUTPUT_EXE build/output/tmp_import_msvcrt_triple.exe
+        EXPECTED_EXIT 1
+        TRACE_MARKERS "[link] input objects" "[link] merged sections" "[link] imports" "[link] resolved symbols" "[link] relocations"
+        OUTPUT_MARKERS "extern fn_puts" "extern fn_putchar" "extern fn_printf" "dll msvcrt.dll:" "fn_puts ->" "fn_putchar ->" "fn_printf ->"
+        LABELS regression phase-current imports
+    )
+
+    add_minic_regression_test(
+        minic_import_file_backed
+        SOURCES input/tmp_import_file_backed.c
+        COMPILER_ARGS --link-trace
+        OUTPUT_EXE build/output/tmp_import_file_backed.exe
+        EXPECTED_EXIT 5
+        TRACE_MARKERS "[link] input objects" "[link] merged sections" "[link] imports" "[link] resolved symbols" "[link] relocations"
+        OUTPUT_MARKERS "extern fn_strlen" "dll msvcrt.dll: fn_strlen (source=file)" "fn_strlen ->" "dll=msvcrt.dll" "source=file"
         LABELS regression phase-current imports
     )
 
@@ -335,6 +388,39 @@ if (WIN32)
         OUTPUT_EXE build/output/tmp_import_unresolved.exe
         EXPECTED_EXIT 0
         ERROR_MARKERS "unresolved external symbol: fn_MissingImport"
+        LABELS regression phase-current imports linker-failures
+    )
+
+    add_minic_regression_test(
+        minic_import_catalog_bad_row
+        SOURCES input/answer.c
+        COMPILER_ARGS --link-trace
+        OUTPUT_EXE build/output/tmp_import_catalog_bad_row.exe
+        EXPECTED_EXIT 0
+        CATALOG_FIXTURE tests/data/import_catalog_bad_row.txt
+        ERROR_MARKERS "invalid import catalog row"
+        LABELS regression phase-current imports linker-failures
+    )
+
+    add_minic_regression_test(
+        minic_import_catalog_duplicate_symbol
+        SOURCES input/answer.c
+        COMPILER_ARGS --link-trace
+        OUTPUT_EXE build/output/tmp_import_catalog_duplicate_symbol.exe
+        EXPECTED_EXIT 0
+        CATALOG_FIXTURE tests/data/import_catalog_duplicate_symbol.txt
+        ERROR_MARKERS "duplicate import catalog symbol" "fn_strlen"
+        LABELS regression phase-current imports linker-failures
+    )
+
+    add_minic_regression_test(
+        minic_import_catalog_duplicate_builtin
+        SOURCES input/answer.c
+        COMPILER_ARGS --link-trace
+        OUTPUT_EXE build/output/tmp_import_catalog_duplicate_builtin.exe
+        EXPECTED_EXIT 0
+        CATALOG_FIXTURE tests/data/import_catalog_duplicate_builtin.txt
+        ERROR_MARKERS "may not override built-in symbol" "fn_puts"
         LABELS regression phase-current imports linker-failures
     )
 
@@ -409,6 +495,57 @@ if (WIN32)
         EXPECTED_EXIT 0
         ERROR_MARKERS "function names"
         LABELS regression phase-current relocations
+    )
+
+    add_minic_regression_test(
+        minic_reloc_probe_global_ptr
+        SOURCES input/tmp_reloc_probe_global_ptr.c
+        COMPILER_ARGS --link-trace
+        OUTPUT_EXE build/output/tmp_reloc_probe_global_ptr.exe
+        EXPECTED_EXIT 42
+        TRACE_MARKERS "[link] input objects" "[link] merged sections" "[link] resolved symbols" "[link] relocations" "[link] base relocations"
+        OUTPUT_MARKERS "symbol gv_x" "symbol gv_p" "section=.data" "type=ADDR64"
+        RELOC_PROBE build/Debug/pe_reloc_probe.exe
+        RELOC_PROBE_ARGS --expect-reloc yes --delta 0x100000 --site 0x2000=0x3000
+        LABELS regression phase-current relocations rebasing
+    )
+
+    add_minic_regression_test(
+        minic_reloc_probe_function_ptr
+        SOURCES input/tmp_reloc_probe_function_ptr.c
+        COMPILER_ARGS --link-trace
+        OUTPUT_EXE build/output/tmp_reloc_probe_function_ptr.exe
+        EXPECTED_EXIT 42
+        TRACE_MARKERS "[link] input objects" "[link] merged sections" "[link] resolved symbols" "[link] relocations" "[link] base relocations"
+        OUTPUT_MARKERS "symbol gv_fn_ptr" "symbol fn_answer" "section=.data" "type=ADDR64"
+        RELOC_PROBE build/Debug/pe_reloc_probe.exe
+        RELOC_PROBE_ARGS --expect-reloc yes --delta 0x100000 --site 0x2000=0x1000
+        LABELS regression phase-current relocations rebasing
+    )
+
+    add_minic_regression_test(
+        minic_reloc_probe_string_ptr
+        SOURCES input/tmp_reloc_probe_string_ptr.c
+        COMPILER_ARGS --link-trace
+        OUTPUT_EXE build/output/tmp_reloc_probe_string_ptr.exe
+        EXPECTED_EXIT 65
+        TRACE_MARKERS "[link] input objects" "[link] merged sections" "[link] resolved symbols" "[link] relocations" "[link] base relocations"
+        OUTPUT_MARKERS "symbol gv_p" "section=.data" "type=ADDR64"
+        RELOC_PROBE build/Debug/pe_reloc_probe.exe
+        RELOC_PROBE_ARGS --expect-reloc yes --delta 0x100000 --site 0x2000=0x3000
+        LABELS regression phase-current relocations rebasing
+    )
+
+    add_minic_regression_test(
+        minic_reloc_no_absolute_data
+        SOURCES input/tmp_reloc_no_absolute_data.c
+        COMPILER_ARGS --link-trace
+        OUTPUT_EXE build/output/tmp_reloc_no_absolute_data.exe
+        EXPECTED_EXIT 7
+        TRACE_MARKERS "[link] input objects" "[link] merged sections" "[link] resolved symbols" "[link] relocations" "[link] base relocations"
+        RELOC_PROBE build/Debug/pe_reloc_probe.exe
+        RELOC_PROBE_ARGS --expect-reloc no
+        LABELS regression phase-current relocations rebasing
     )
 
     add_minic_regression_test(

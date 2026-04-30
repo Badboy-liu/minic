@@ -20,6 +20,7 @@ namespace {
 constexpr std::uint16_t MachineAmd64 = 0x8664;
 constexpr std::uint16_t RelAmd64Addr64 = 0x0001;
 constexpr std::uint16_t RelAmd64Rel32 = 0x0004;
+constexpr std::uint16_t ImageRelBasedDir64 = 10;
 constexpr std::int16_t UndefinedSection = 0;
 constexpr std::uint8_t StorageClassExternal = 2;
 constexpr std::uint32_t SectionContainsUninitializedData = 0x00000080;
@@ -83,6 +84,7 @@ struct ImportLayout {
         std::string symbolName;
         std::string importName;
         std::string dllName;
+        std::string sourceName;
         std::uint32_t thunkRva = 0;
         std::uint32_t iatRva = 0;
     };
@@ -93,20 +95,42 @@ struct ImportLayout {
     std::vector<Group> groups;
 };
 
+struct BaseRelocationSite {
+    std::string sectionName;
+    std::uint32_t slotRva = 0;
+};
+
+struct BaseRelocationLayout {
+    std::uint32_t rva = 0;
+    std::vector<std::uint8_t> bytes;
+    std::vector<std::uint32_t> pageRvas;
+    std::vector<std::uint16_t> entryCounts;
+    std::size_t siteCount = 0;
+};
+
 struct ResolvedSymbolTraceEntry {
     fs::path objectPath;
     std::string sectionName;
     std::string name;
     std::string importDllName;
+    std::string importSourceName;
     std::uint32_t rva = 0;
     std::uint32_t importIatRva = 0;
     bool imported = false;
 };
 
 struct ImportSpec {
-    const char *symbolName;
-    const char *importName;
-    const char *dllName;
+    std::string symbolName;
+    std::string importName;
+    std::string dllName;
+    std::string sourceName;
+};
+
+struct ResolvedImportEntry {
+    std::string symbolName;
+    std::string importName;
+    std::string dllName;
+    std::string sourceName;
 };
 
 struct RelocationTraceEntry {
@@ -126,6 +150,8 @@ std::uint32_t alignTo(std::uint32_t value, std::uint32_t alignment) {
     return (value + alignment - 1) / alignment * alignment;
 }
 
+std::string linkerDiagnostic(const std::string &detail);
+
 bool isRecognizedSection(const std::string &name) {
     return name == ".text" || name == ".data" || name == ".rdata" || name == ".bss";
 }
@@ -134,17 +160,104 @@ bool isTraceableSymbol(const Symbol &symbol) {
     return !symbol.name.empty() && symbol.name[0] != '.' && symbol.storageClass == StorageClassExternal;
 }
 
-const std::vector<ImportSpec> &importCatalog() {
+const std::vector<ImportSpec> &builtinImportCatalog() {
     static const std::vector<ImportSpec> imports = {
-        {"ExitProcess", "ExitProcess", "kernel32.dll"},
-        {"fn_GetCurrentProcessId", "GetCurrentProcessId", "kernel32.dll"},
-        {"fn_puts", "puts", "msvcrt.dll"},
+        {"ExitProcess", "ExitProcess", "kernel32.dll", "builtin"},
+        {"fn_GetCurrentProcessId", "GetCurrentProcessId", "kernel32.dll", "builtin"},
+        {"fn_puts", "puts", "msvcrt.dll", "builtin"},
+        {"fn_putchar", "putchar", "msvcrt.dll", "builtin"},
+        {"fn_printf", "printf", "msvcrt.dll", "builtin"},
     };
     return imports;
 }
 
-const ImportSpec *findImportSpec(const std::string &symbolName) {
-    const auto &catalog = importCatalog();
+fs::path importCatalogPath() {
+    return fs::current_path() / "config" / "import_catalog.txt";
+}
+
+std::string trimCopy(const std::string &value) {
+    const auto begin = value.find_first_not_of(" \t\r\n");
+    if (begin == std::string::npos) {
+        return "";
+    }
+    const auto end = value.find_last_not_of(" \t\r\n");
+    return value.substr(begin, end - begin + 1);
+}
+
+std::vector<ImportSpec> loadFileImportCatalog() {
+    const fs::path catalogPath = importCatalogPath();
+    if (!fs::exists(catalogPath)) {
+        return {};
+    }
+
+    std::ifstream input(catalogPath);
+    if (!input) {
+        throw std::runtime_error(linkerDiagnostic("failed to open import catalog: " + catalogPath.string()));
+    }
+
+    std::vector<ImportSpec> imports;
+    std::unordered_map<std::string, std::size_t> seenLines;
+    std::string line;
+    std::size_t lineNumber = 0;
+    while (std::getline(input, line)) {
+        ++lineNumber;
+        const std::string trimmed = trimCopy(line);
+        if (trimmed.empty() || trimmed[0] == '#') {
+            continue;
+        }
+
+        std::vector<std::string> fields;
+        std::size_t start = 0;
+        while (true) {
+            const std::size_t separator = trimmed.find('|', start);
+            if (separator == std::string::npos) {
+                fields.push_back(trimCopy(trimmed.substr(start)));
+                break;
+            }
+            fields.push_back(trimCopy(trimmed.substr(start, separator - start)));
+            start = separator + 1;
+        }
+
+        if (fields.size() != 3 || fields[0].empty() || fields[1].empty() || fields[2].empty()) {
+            throw std::runtime_error(
+                linkerDiagnostic(
+                    "invalid import catalog row " + catalogPath.string() + ":" + std::to_string(lineNumber) +
+                    "; expected symbol|dll|import"));
+        }
+
+        const auto [it, inserted] = seenLines.emplace(fields[0], lineNumber);
+        if (!inserted) {
+            throw std::runtime_error(
+                linkerDiagnostic(
+                    "duplicate import catalog symbol " + fields[0] + " in " + catalogPath.string() +
+                    " at lines " + std::to_string(it->second) + " and " + std::to_string(lineNumber)));
+        }
+
+        imports.push_back(ImportSpec{fields[0], fields[2], fields[1], "file"});
+    }
+
+    return imports;
+}
+
+std::vector<ImportSpec> loadImportCatalog() {
+    std::vector<ImportSpec> merged = builtinImportCatalog();
+    const std::vector<ImportSpec> fileCatalog = loadFileImportCatalog();
+    std::unordered_map<std::string, bool> builtinNames;
+    for (const auto &entry : builtinImportCatalog()) {
+        builtinNames.emplace(entry.symbolName, true);
+    }
+    for (const auto &entry : fileCatalog) {
+        if (builtinNames.find(entry.symbolName) != builtinNames.end()) {
+            throw std::runtime_error(
+                linkerDiagnostic(
+                    "file-backed import catalog may not override built-in symbol: " + entry.symbolName));
+        }
+        merged.push_back(entry);
+    }
+    return merged;
+}
+
+const ImportSpec *resolveImportSymbol(const std::string &symbolName, const std::vector<ImportSpec> &catalog) {
     const auto found = std::find_if(
         catalog.begin(),
         catalog.end(),
@@ -156,7 +269,7 @@ const ImportSpec *findImportSpec(const std::string &symbolName) {
 }
 
 bool isImportedSymbolName(const std::string &symbolName) {
-    return findImportSpec(symbolName) != nullptr;
+    return resolveImportSymbol(symbolName, loadImportCatalog()) != nullptr;
 }
 
 std::string hex32(std::uint32_t value) {
@@ -180,7 +293,7 @@ std::string countLabel(std::size_t count, const char *singular, const char *plur
 }
 
 std::string targetDescription(const Symbol &symbol, std::int32_t addend) {
-    if (symbol.sectionNumber == UndefinedSection && isImportedSymbolName(symbol.name)) {
+    if (symbol.sectionNumber == UndefinedSection) {
         return "import " + symbol.name;
     }
     if (addend == 0) {
@@ -193,7 +306,7 @@ std::string targetDescription(const Symbol &symbol, std::int32_t addend) {
 }
 
 std::string targetDescription64(const Symbol &symbol, std::int64_t addend) {
-    if (symbol.sectionNumber == UndefinedSection && isImportedSymbolName(symbol.name)) {
+    if (symbol.sectionNumber == UndefinedSection) {
         return "import " + symbol.name;
     }
     if (addend == 0) {
@@ -430,9 +543,10 @@ std::vector<Relocation> readRelocations(const ObjectFile &object, const Section 
     return relocations;
 }
 
-std::vector<ImportLayout::Group> buildRequestedImports(
+std::vector<ResolvedImportEntry> collectResolvedImports(
     const std::vector<LinkedObject> &linkedObjects,
-    const std::unordered_map<std::string, bool> &definedSymbolNames) {
+    const std::unordered_map<std::string, bool> &definedSymbolNames,
+    const std::vector<ImportSpec> &catalog) {
     std::unordered_map<std::string, bool> unresolvedExternals;
     for (const auto &linkedObject : linkedObjects) {
         for (const auto &symbol : linkedObject.object.symbols) {
@@ -446,24 +560,51 @@ std::vector<ImportLayout::Group> buildRequestedImports(
         }
     }
 
-    std::vector<ImportLayout::Group> groups;
-    for (const auto &spec : importCatalog()) {
-        const auto unresolved = unresolvedExternals.find(spec.symbolName);
-        if (unresolved == unresolvedExternals.end()) {
+    std::vector<ResolvedImportEntry> imports;
+    for (const auto &[symbolName, _] : unresolvedExternals) {
+        const ImportSpec *resolved = resolveImportSymbol(symbolName, catalog);
+        if (resolved == nullptr) {
             continue;
         }
+        imports.push_back(
+            ResolvedImportEntry{
+                resolved->symbolName,
+                resolved->importName,
+                resolved->dllName,
+                resolved->sourceName});
+    }
+    std::sort(
+        imports.begin(),
+        imports.end(),
+        [](const ResolvedImportEntry &left, const ResolvedImportEntry &right) {
+            if (left.dllName != right.dllName) {
+                return left.dllName < right.dllName;
+            }
+            return left.symbolName < right.symbolName;
+        });
+    return imports;
+}
+
+std::vector<ImportLayout::Group> groupResolvedImports(const std::vector<ResolvedImportEntry> &resolvedImports) {
+    std::vector<ImportLayout::Group> groups;
+    for (const auto &entry : resolvedImports) {
         auto group = std::find_if(
             groups.begin(),
             groups.end(),
-            [&](const ImportLayout::Group &entry) { return entry.dllName == spec.dllName; });
+            [&](const ImportLayout::Group &candidate) { return candidate.dllName == entry.dllName; });
         if (group == groups.end()) {
-            groups.push_back(ImportLayout::Group{spec.dllName, {}});
+            groups.push_back(ImportLayout::Group{entry.dllName, {}});
             group = std::prev(groups.end());
         }
-        group->symbols.push_back(ImportLayout::Symbol{spec.symbolName, spec.importName, spec.dllName, 0, 0});
-        unresolvedExternals.erase(unresolved);
+        group->symbols.push_back(
+            ImportLayout::Symbol{
+                entry.symbolName,
+                entry.importName,
+                entry.dllName,
+                entry.sourceName,
+                0,
+                0});
     }
-
     return groups;
 }
 
@@ -585,7 +726,8 @@ void applyRelocations(
     const std::unordered_map<std::string, std::uint32_t> &sectionRvas,
     const std::unordered_map<std::string, std::uint32_t> &externalSymbols,
     SectionLayout &textLayout,
-    std::vector<RelocationTraceEntry> *traceEntries) {
+    std::vector<RelocationTraceEntry> *traceEntries,
+    std::vector<BaseRelocationSite> *baseRelocationSites) {
     const ObjectFile &object = linkedObject.object;
     const std::size_t textSectionIndex = findTextSectionIndex(object);
     const Section &textSection = object.sections[textSectionIndex];
@@ -673,6 +815,11 @@ void applyRelocations(
             textLayout.bytes,
             linkedObject.sectionOffsets[textSectionIndex] + relocation.offset,
             storedValue);
+        if (baseRelocationSites) {
+            baseRelocationSites->push_back(BaseRelocationSite{
+                ".text",
+                sectionRvas.at(".text") + linkedObject.sectionOffsets[textSectionIndex] + relocation.offset});
+        }
     }
 }
 
@@ -681,7 +828,8 @@ void applyInitializedDataRelocations(
     const std::unordered_map<std::string, std::uint32_t> &sectionRvas,
     const std::unordered_map<std::string, std::uint32_t> &externalSymbols,
     std::vector<SectionLayout> &layouts,
-    std::vector<RelocationTraceEntry> *traceEntries) {
+    std::vector<RelocationTraceEntry> *traceEntries,
+    std::vector<BaseRelocationSite> *baseRelocationSites) {
     for (std::size_t sectionIndex = 0; sectionIndex < linkedObject.object.sections.size(); ++sectionIndex) {
         const Section &section = linkedObject.object.sections[sectionIndex];
         if (section.name == ".text" || section.relocationCount == 0 || section.rawSize == 0) {
@@ -750,6 +898,11 @@ void applyInitializedDataRelocations(
             }
 
             write64(layoutIt->bytes, mergedSectionOffset + relocation.offset, storedValue);
+            if (baseRelocationSites) {
+                baseRelocationSites->push_back(BaseRelocationSite{
+                    section.name,
+                    layoutIt->rva + mergedSectionOffset + relocation.offset});
+            }
         }
     }
 }
@@ -759,6 +912,54 @@ void writeBytes(std::vector<std::uint8_t> &file, std::size_t offset, const std::
         throw std::runtime_error("internal linker error: write outside file");
     }
     std::copy(bytes.begin(), bytes.end(), file.begin() + offset);
+}
+
+BaseRelocationLayout buildBaseRelocationLayout(std::uint32_t relocRva, std::vector<BaseRelocationSite> sites) {
+    BaseRelocationLayout layout;
+    layout.rva = relocRva;
+    if (sites.empty()) {
+        return layout;
+    }
+
+    std::sort(
+        sites.begin(),
+        sites.end(),
+        [](const BaseRelocationSite &left, const BaseRelocationSite &right) { return left.slotRva < right.slotRva; });
+    sites.erase(
+        std::unique(
+            sites.begin(),
+            sites.end(),
+            [](const BaseRelocationSite &left, const BaseRelocationSite &right) {
+                return left.slotRva == right.slotRva;
+            }),
+        sites.end());
+    layout.siteCount = sites.size();
+
+    std::size_t index = 0;
+    while (index < sites.size()) {
+        const std::uint32_t pageRva = sites[index].slotRva & ~0x0FFFu;
+        std::vector<std::uint16_t> entries;
+        while (index < sites.size() && (sites[index].slotRva & ~0x0FFFu) == pageRva) {
+            entries.push_back(static_cast<std::uint16_t>(
+                (static_cast<std::uint16_t>(ImageRelBasedDir64) << 12) | (sites[index].slotRva & 0x0FFFu)));
+            ++index;
+        }
+
+        layout.pageRvas.push_back(pageRva);
+        layout.entryCounts.push_back(static_cast<std::uint16_t>(entries.size()));
+        const std::size_t blockOffset = layout.bytes.size();
+        append32(layout.bytes, pageRva);
+        append32(layout.bytes, 0);
+        for (const std::uint16_t entry : entries) {
+            append16(layout.bytes, entry);
+        }
+        while (layout.bytes.size() % 4 != 0) {
+            append16(layout.bytes, 0);
+        }
+        patch32(layout.bytes, blockOffset + 4, static_cast<std::uint32_t>(layout.bytes.size() - blockOffset));
+    }
+
+    return layout;
 }
 
 void writeSectionName(std::vector<std::uint8_t> &file, std::size_t offset, const char *name) {
@@ -879,6 +1080,7 @@ std::unordered_map<std::string, std::uint32_t> collectExternalSymbols(
                     section.name,
                     symbol.name,
                     "",
+                    "",
                     rva,
                     0,
                     false});
@@ -941,10 +1143,13 @@ void traceMergedSections(
     std::uint32_t idataRva,
     std::uint32_t idataVirtualSize,
     std::uint32_t idataRawPointer,
-    std::uint32_t idataRawSize) {
+    std::uint32_t idataRawSize,
+    const BaseRelocationLayout &baseRelocations,
+    std::uint32_t relocRawPointer,
+    std::uint32_t relocRawSize) {
     out << "[link] merged sections\n";
-    std::uint32_t totalVirtualSize = idataVirtualSize;
-    std::uint32_t totalRawSize = idataRawSize;
+    std::uint32_t totalVirtualSize = idataVirtualSize + static_cast<std::uint32_t>(baseRelocations.bytes.size());
+    std::uint32_t totalRawSize = idataRawSize + relocRawSize;
     for (const auto &section : sections) {
         totalVirtualSize += section.virtualSize;
         totalRawSize += section.rawSize;
@@ -961,7 +1166,17 @@ void traceMergedSections(
         << " raw_size=" << idataRawSize
         << " raw_ptr=" << hex32(idataRawPointer)
         << " uninitialized=no\n";
-    out << "[link]   summary sections=" << (sections.size() + 1)
+    std::size_t totalSections = sections.size() + 1;
+    if (!baseRelocations.bytes.empty()) {
+        out << "[link]   .reloc"
+            << " rva=" << hex32(baseRelocations.rva)
+            << " vsize=" << static_cast<std::uint32_t>(baseRelocations.bytes.size())
+            << " raw_size=" << relocRawSize
+            << " raw_ptr=" << hex32(relocRawPointer)
+            << " uninitialized=no\n";
+        ++totalSections;
+    }
+    out << "[link]   summary sections=" << totalSections
         << " total_vsize=" << totalVirtualSize
         << " total_raw_size=" << totalRawSize << '\n';
 }
@@ -977,6 +1192,7 @@ void traceResolvedSymbols(
                 ".idata",
                 symbol.symbolName,
                 symbol.dllName,
+                symbol.sourceName,
                 symbol.thunkRva,
                 symbol.iatRva,
                 true});
@@ -997,6 +1213,7 @@ void traceResolvedSymbols(
         if (entry.imported) {
             out << " import_thunk"
                 << " dll=" << entry.importDllName
+                << " source=" << entry.importSourceName
                 << " iat=" << hex32(entry.importIatRva);
         } else {
             out << " from " << entry.objectPath.string() << ":" << entry.sectionName;
@@ -1023,7 +1240,8 @@ void traceImports(std::ostream &out, const ImportLayout &imports) {
             if (i > 0) {
                 out << ", ";
             }
-            out << group.symbols[i].symbolName;
+            out << group.symbols[i].symbolName
+                << " (source=" << group.symbols[i].sourceName << ")";
         }
         out << '\n';
     }
@@ -1046,6 +1264,20 @@ void traceRelocations(std::ostream &out, const std::vector<RelocationTraceEntry>
             out << " relative=" << entry.relative;
         }
         out << '\n';
+    }
+}
+
+void traceBaseRelocations(std::ostream &out, const BaseRelocationLayout &layout) {
+    out << "[link] base relocations\n";
+    if (layout.bytes.empty()) {
+        out << "[link]   none\n";
+        return;
+    }
+    out << "[link]   summary " << countLabel(layout.siteCount, "site", "sites")
+        << " blocks=" << layout.pageRvas.size() << '\n';
+    for (std::size_t i = 0; i < layout.pageRvas.size(); ++i) {
+        out << "[link]   page=" << hex32(layout.pageRvas[i])
+            << " entries=" << layout.entryCounts[i] << '\n';
     }
 }
 
@@ -1072,10 +1304,13 @@ void PeLinker::linkObjects(
         throw std::runtime_error(linkerDiagnostic("linked objects do not contain a .text section"));
     }
 
+    const std::vector<ImportSpec> importCatalog = loadImportCatalog();
     const std::unordered_map<std::string, bool> definedSymbolNames =
         collectDefinedExternalNames(linkedObjects);
+    const std::vector<ResolvedImportEntry> resolvedImports =
+        collectResolvedImports(linkedObjects, definedSymbolNames, importCatalog);
     std::vector<ImportLayout::Group> requestedImports =
-        buildRequestedImports(linkedObjects, definedSymbolNames);
+        groupResolvedImports(resolvedImports);
     for (auto &group : requestedImports) {
         for (auto &symbol : group.symbols) {
             const std::uint32_t thunkOffset = static_cast<std::uint32_t>(textLayout->bytes.size());
@@ -1124,22 +1359,29 @@ void PeLinker::linkObjects(
     }
     const std::uint32_t entryRva = entry->second;
     std::vector<RelocationTraceEntry> relocationTraceEntries;
+    std::vector<BaseRelocationSite> baseRelocationSites;
     for (const auto &linkedObject : linkedObjects) {
         applyRelocations(
             linkedObject,
             sectionRvas,
             externalSymbols,
             *textLayout,
-            trace ? &relocationTraceEntries : nullptr);
+            trace ? &relocationTraceEntries : nullptr,
+            &baseRelocationSites);
         applyInitializedDataRelocations(
             linkedObject,
             sectionRvas,
             externalSymbols,
             sections,
-            trace ? &relocationTraceEntries : nullptr);
+            trace ? &relocationTraceEntries : nullptr,
+            &baseRelocationSites);
     }
 
-    const std::uint32_t sectionCount = static_cast<std::uint32_t>(sections.size() + 1);
+    const BaseRelocationLayout baseRelocations = buildBaseRelocationLayout(
+        alignTo(idataRva + static_cast<std::uint32_t>(imports.bytes.size()), SectionAlignment),
+        baseRelocationSites);
+    const bool hasBaseRelocations = !baseRelocations.bytes.empty();
+    const std::uint32_t sectionCount = static_cast<std::uint32_t>(sections.size() + 1 + (hasBaseRelocations ? 1 : 0));
     const std::uint32_t headersSize = alignTo(0x80 + 4 + 20 + 0xf0 + sectionCount * 40, FileAlignment);
     std::uint32_t nextRawPointer = headersSize;
     for (auto &section : sections) {
@@ -1155,14 +1397,32 @@ void PeLinker::linkObjects(
     const std::uint32_t idataVirtualSize = static_cast<std::uint32_t>(imports.bytes.size());
     const std::uint32_t idataRawSize = alignTo(idataVirtualSize, FileAlignment);
     const std::uint32_t idataRawPointer = nextRawPointer;
-    const std::uint32_t sizeOfImage = alignTo(idataRva + idataVirtualSize, SectionAlignment);
-    const std::uint32_t fileSize = idataRawPointer + idataRawSize;
+    nextRawPointer += idataRawSize;
+    const std::uint32_t relocVirtualSize = static_cast<std::uint32_t>(baseRelocations.bytes.size());
+    const std::uint32_t relocRawSize = hasBaseRelocations ? alignTo(relocVirtualSize, FileAlignment) : 0;
+    const std::uint32_t relocRawPointer = nextRawPointer;
+    if (hasBaseRelocations) {
+        nextRawPointer += relocRawSize;
+    }
+    const std::uint32_t finalImageEnd = hasBaseRelocations ? (baseRelocations.rva + relocVirtualSize) : (idataRva + idataVirtualSize);
+    const std::uint32_t sizeOfImage = alignTo(finalImageEnd, SectionAlignment);
+    const std::uint32_t fileSize = nextRawPointer;
 
     if (trace) {
-        traceMergedSections(*trace, sections, idataRva, idataVirtualSize, idataRawPointer, idataRawSize);
+        traceMergedSections(
+            *trace,
+            sections,
+            idataRva,
+            idataVirtualSize,
+            idataRawPointer,
+            idataRawSize,
+            baseRelocations,
+            relocRawPointer,
+            relocRawSize);
         traceImports(*trace, imports);
         traceResolvedSymbols(*trace, resolvedSymbolTraceEntries, imports);
         traceRelocations(*trace, relocationTraceEntries);
+        traceBaseRelocations(*trace, baseRelocations);
     }
 
     std::vector<std::uint8_t> file(0x80, 0);
@@ -1215,9 +1475,7 @@ void PeLinker::linkObjects(
     append32(file, headersSize);
     append32(file, 0);
     append16(file, 3);
-    // The current teaching linker does not emit a .reloc table yet, so
-    // data-side absolute addresses must keep the preferred image base.
-    append16(file, 0x8100);
+    append16(file, hasBaseRelocations ? 0x8140 : 0x8100);
     append64(file, 0x100000);
     append64(file, 0x1000);
     append64(file, 0x100000);
@@ -1228,7 +1486,15 @@ void PeLinker::linkObjects(
     append32(file, 0);
     append32(file, imports.idtRva);
     append32(file, imports.idtSize);
-    for (int i = 2; i < 16; ++i) {
+    append32(file, 0);
+    append32(file, 0);
+    append32(file, 0);
+    append32(file, 0);
+    append32(file, 0);
+    append32(file, 0);
+    append32(file, hasBaseRelocations ? baseRelocations.rva : 0);
+    append32(file, hasBaseRelocations ? relocVirtualSize : 0);
+    for (int i = 6; i < 16; ++i) {
         append32(file, 0);
         append32(file, 0);
     }
@@ -1253,6 +1519,17 @@ void PeLinker::linkObjects(
     write32(file, idataHeader + 20, idataRawPointer);
     write32(file, idataHeader + 36, 0xc0000040);
 
+    if (hasBaseRelocations) {
+        const std::size_t relocHeader = file.size();
+        file.resize(file.size() + 40, 0);
+        writeSectionName(file, relocHeader, ".reloc");
+        write32(file, relocHeader + 8, relocVirtualSize);
+        write32(file, relocHeader + 12, baseRelocations.rva);
+        write32(file, relocHeader + 16, relocRawSize);
+        write32(file, relocHeader + 20, relocRawPointer);
+        write32(file, relocHeader + 36, 0x42000040);
+    }
+
     if (file.size() > headersSize) {
         throw std::runtime_error("internal linker error: PE headers exceed declared header size");
     }
@@ -1262,6 +1539,9 @@ void PeLinker::linkObjects(
         writeBytes(file, section.rawPointer, section.bytes);
     }
     writeBytes(file, idataRawPointer, imports.bytes);
+    if (hasBaseRelocations) {
+        writeBytes(file, relocRawPointer, baseRelocations.bytes);
+    }
 
     if (!exePath.parent_path().empty()) {
         fs::create_directories(exePath.parent_path());

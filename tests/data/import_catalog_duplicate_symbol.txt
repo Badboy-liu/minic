@@ -1,0 +1,2 @@
+fn_strlen|msvcrt.dll|strlen
+fn_strlen|msvcrt.dll|strlen

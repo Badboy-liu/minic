@@ -25,6 +25,7 @@ Today the built-in PE linker supports:
 - the minimal compiler-generated `ADDR64` cases read from `.data`
 - AMD64 COFF `REL32`
 - AMD64 COFF `ADDR64`
+- PE32+ `DIR64` base relocations for supported absolute-address image slots
 - targets in merged `.text`, `.data`, `.rdata`, and `.bss`
 - cross-object external symbol resolution
 - the hard-coded imported `ExitProcess` thunk
@@ -99,7 +100,6 @@ The following areas are still missing, but they do not block the current compile
 - broader absolute-address relocation forms
 - more specialized call/jump relocation kinds
 - richer import relocation handling
-- PE base relocation table emission for rebasing absolute pointers
 
 Those gaps matter for future growth, but they are not required to keep the current language subset self-consistent.
 
@@ -156,7 +156,7 @@ If the goal is to keep `minic` self-consistent first, the next relocation work s
 1. Confirm whether any current or near-term codegen change can produce a relocation outside the currently supported `.text` plus minimal `.data` subset
 2. If yes, add support for the narrowest real case needed by `minic`
 3. Add a sample, trace coverage, and regression coverage for that exact case
-4. Keep the PE image-base/rebasing boundary explicit until a `.reloc` path exists
+4. Broaden only after the current `.reloc`-backed absolute-address subset is fully covered by tests
 5. Only then broaden toward more general NASM/COFF support
 
 ## Short Version
@@ -166,4 +166,4 @@ The current `minic` pipeline is in a better state because its non-local referenc
 - `REL32` from `.text`
 - minimal `ADDR64` from `.data`
 
-The next real relocation boundary is now broader data/address usage such as function pointers, pointer tables, and rebasing support for absolute pointers.
+The next real relocation boundary is now broader data/address usage beyond the current `.data` and helper-object `ADDR64` subset, not the existence of PE rebasing itself.

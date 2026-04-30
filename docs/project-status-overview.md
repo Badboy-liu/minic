@@ -63,9 +63,11 @@ Current status:
   - `.bss`
 - cross-object external symbol resolution works
 - minimal import handling exists for `ExitProcess`
-- DLL-aware import grouping now exists for a small curated set across `kernel32.dll` and `msvcrt.dll`
+- DLL-aware import grouping now exists for a small table-driven catalog across `kernel32.dll` and `msvcrt.dll`
+- repository-level file-backed import catalog extension now exists through `config/import_catalog.txt`
 - `REL32` relocation handling works on the current supported path
 - function-address `ADDR64` relocations from `.data` into `.text` now work on the current compiler-generated path
+- supported absolute-address image slots now emit PE `.reloc` metadata for rebasing
 - `.bss` section-symbol plus addend behavior has been debugged and fixed
 - teaching-oriented `--link-trace` output now exposes:
   - input objects
@@ -109,7 +111,7 @@ This is not because the linker is low quality. It is because it now matters more
 The main weak spots are:
 
 - relocation coverage is still narrow
-- import handling is still intentionally small even though it now covers multiple DLLs
+- import handling is still intentionally small even though it now covers multiple DLLs, a few common C runtime calls, and a narrow file-backed extension path
 - compatibility with non-`minic` object producers is intentionally weak
 - failure diagnostics are functional but not yet systematic
 
@@ -153,7 +155,7 @@ Recommended priority order:
 
 1. Expand relocation coverage
 2. Add more failure-case teaching and regression samples
-3. Extend import handling
+3. Extend import handling and file-backed catalog flexibility
 
 ## Short Version
 

@@ -74,6 +74,19 @@
       }
     },
     {
+      "name": "rebasing",
+      "configurePreset": "default",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "filter": {
+        "include": {
+          "label": "rebasing"
+        }
+      }
+    },
+    {
       "name": "linker-failures",
       "configurePreset": "default",
       "configuration": "Debug",

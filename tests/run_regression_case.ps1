@@ -24,6 +24,12 @@ param(
 
     [string]$RequiredFileMarkers = "",
 
+    [string]$CatalogFixture = "",
+
+    [string]$RelocProbe = "",
+
+    [string]$RelocProbeArgs = "",
+
     [switch]$ExpectCompilerFailure,
 
     [switch]$RunWithWsl,
@@ -209,71 +215,167 @@ function Assert-WslExitCode {
     }
 }
 
+function Invoke-RelocProbe {
+    param(
+        [string]$ProbePath,
+        [string]$ExePath,
+        [string]$Arguments
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ProbePath)) {
+        return
+    }
+
+    $resolvedProbe = Join-Path $RepoRoot $ProbePath
+    if (-not (Test-Path $resolvedProbe)) {
+        throw "Relocation probe does not exist: $resolvedProbe"
+    }
+
+    $resolvedExe = Join-Path $RepoRoot $ExePath
+    if (-not (Test-Path $resolvedExe)) {
+        throw "Executable does not exist for relocation probe: $resolvedExe"
+    }
+
+    $probeArgs = @($resolvedExe)
+    foreach ($argument in (Split-List $Arguments)) {
+        $probeArgs += $argument
+    }
+
+    $savedErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $resolvedProbe @probeArgs 2>&1 | Out-String | Out-Null
+    } finally {
+        $ErrorActionPreference = $savedErrorActionPreference
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw "Relocation probe failed for $ExePath"
+    }
+}
+
+function Enter-CatalogFixture {
+    param(
+        [string]$FixturePath
+    )
+
+    if ([string]::IsNullOrWhiteSpace($FixturePath)) {
+        return $null
+    }
+
+    $targetPath = Join-Path $RepoRoot "config/import_catalog.txt"
+    $resolvedFixture = Join-Path $RepoRoot $FixturePath
+    if (-not (Test-Path $resolvedFixture)) {
+        throw "Catalog fixture does not exist: $resolvedFixture"
+    }
+
+    $state = @{
+        TargetPath = $targetPath
+        BackupExists = Test-Path $targetPath
+        BackupText = $null
+    }
+    if ($state.BackupExists) {
+        $state.BackupText = Get-Content -Path $targetPath -Raw
+    }
+
+    $targetDirectory = Split-Path -Parent $targetPath
+    if (-not (Test-Path $targetDirectory)) {
+        New-Item -ItemType Directory -Force -Path $targetDirectory | Out-Null
+    }
+    Copy-Item -LiteralPath $resolvedFixture -Destination $targetPath -Force
+    return $state
+}
+
+function Exit-CatalogFixture {
+    param(
+        $State
+    )
+
+    if ($null -eq $State) {
+        return
+    }
+
+    if ($State.BackupExists) {
+        Set-Content -Path $State.TargetPath -Value $State.BackupText -NoNewline
+        return
+    }
+
+    if (Test-Path $State.TargetPath) {
+        Remove-Item -LiteralPath $State.TargetPath -Force
+    }
+}
+
 if ($SkipIfWslUnavailable -and -not (Test-WslGccAvailable)) {
     Write-Output "Skipping regression case because WSL with gcc is not available on this host"
     exit 0
 }
 
-$compilerInvocation = @()
-foreach ($source in (Split-List $SourceFiles)) {
-    $resolvedPath = Join-Path $RepoRoot $source
-    if ([IO.Path]::GetExtension($resolvedPath) -eq ".asm") {
-        $compilerInvocation += (Assemble-InputObject $resolvedPath)
-    } else {
-        $compilerInvocation += $resolvedPath
-    }
-}
-foreach ($argument in (Split-List $CompilerArgs)) {
-    if ($argument.StartsWith("REPO:")) {
-        $compilerInvocation += (Join-Path $RepoRoot $argument.Substring(5))
-    } else {
-        $compilerInvocation += $argument
-    }
-}
-
-$compilerOutput = Invoke-Compiler $compilerInvocation
-
-foreach ($marker in (Split-List $RequiredTraceMarkers)) {
-    if (-not $compilerOutput.Contains($marker)) {
-        throw "Missing required trace marker '$marker'"
-    }
-}
-
-foreach ($marker in (Split-List $RequiredOutputMarkers)) {
-    if (-not $compilerOutput.Contains($marker)) {
-        throw "Missing required compiler output marker '$marker'"
-    }
-}
-
-foreach ($marker in (Split-List $RequiredErrorMarkers)) {
-    if (-not $compilerOutput.Contains($marker)) {
-        throw "Missing required compiler error marker '$marker'"
-    }
-}
-
-if (-not [string]::IsNullOrWhiteSpace($CheckFile)) {
-    $resolvedCheckFile = Join-Path $RepoRoot $CheckFile
-    if (-not (Test-Path $resolvedCheckFile)) {
-        throw "Expected file to exist for marker checks: $resolvedCheckFile"
-    }
-    $fileContents = Get-Content -Path $resolvedCheckFile -Raw
-    foreach ($marker in (Split-List $RequiredFileMarkers)) {
-        if (-not $fileContents.Contains($marker)) {
-            throw "Missing required file marker '$marker' in $resolvedCheckFile"
+$catalogState = Enter-CatalogFixture $CatalogFixture
+try {
+    $compilerInvocation = @()
+    foreach ($source in (Split-List $SourceFiles)) {
+        $resolvedPath = Join-Path $RepoRoot $source
+        if ([IO.Path]::GetExtension($resolvedPath) -eq ".asm") {
+            $compilerInvocation += (Assemble-InputObject $resolvedPath)
+        } else {
+            $compilerInvocation += $resolvedPath
         }
     }
-}
+    foreach ($argument in (Split-List $CompilerArgs)) {
+        if ($argument.StartsWith("REPO:")) {
+            $compilerInvocation += (Join-Path $RepoRoot $argument.Substring(5))
+        } else {
+            $compilerInvocation += $argument
+        }
+    }
 
-if ($ExpectCompilerFailure) {
-    exit 0
-}
+    $compilerOutput = Invoke-Compiler $compilerInvocation
 
-if ($SkipRun) {
-    exit 0
-}
+    foreach ($marker in (Split-List $RequiredTraceMarkers)) {
+        if (-not $compilerOutput.Contains($marker)) {
+            throw "Missing required trace marker '$marker'"
+        }
+    }
 
-if ($RunWithWsl) {
-    Assert-WslExitCode $OutputExe $ExpectedExit
-} else {
-    Assert-ExitCode (Join-Path $RepoRoot $OutputExe) $ExpectedExit
+    foreach ($marker in (Split-List $RequiredOutputMarkers)) {
+        if (-not $compilerOutput.Contains($marker)) {
+            throw "Missing required compiler output marker '$marker'"
+        }
+    }
+
+    foreach ($marker in (Split-List $RequiredErrorMarkers)) {
+        if (-not $compilerOutput.Contains($marker)) {
+            throw "Missing required compiler error marker '$marker'"
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($CheckFile)) {
+        $resolvedCheckFile = Join-Path $RepoRoot $CheckFile
+        if (-not (Test-Path $resolvedCheckFile)) {
+            throw "Expected file to exist for marker checks: $resolvedCheckFile"
+        }
+        $fileContents = Get-Content -Path $resolvedCheckFile -Raw
+        foreach ($marker in (Split-List $RequiredFileMarkers)) {
+            if (-not $fileContents.Contains($marker)) {
+                throw "Missing required file marker '$marker' in $resolvedCheckFile"
+            }
+        }
+    }
+
+    if ($ExpectCompilerFailure) {
+        exit 0
+    }
+
+    Invoke-RelocProbe $RelocProbe $OutputExe $RelocProbeArgs
+
+    if ($SkipRun) {
+        exit 0
+    }
+
+    if ($RunWithWsl) {
+        Assert-WslExitCode $OutputExe $ExpectedExit
+    } else {
+        Assert-ExitCode (Join-Path $RepoRoot $OutputExe) $ExpectedExit
+    }
+} finally {
+    Exit-CatalogFixture $catalogState
 }
