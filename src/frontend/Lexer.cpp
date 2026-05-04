@@ -39,6 +39,9 @@ std::vector<Token> Lexer::tokenize() {
         case ']':
             tokens.push_back(makeToken(TokenKind::RightBracket, "]"));
             break;
+        case '.':
+            tokens.push_back(makeToken(TokenKind::Dot, "."));
+            break;
         case ';':
             tokens.push_back(makeToken(TokenKind::Semicolon, ";"));
             break;
@@ -49,7 +52,11 @@ std::vector<Token> Lexer::tokenize() {
             tokens.push_back(makeToken(TokenKind::Plus, "+"));
             break;
         case '-':
-            tokens.push_back(makeToken(TokenKind::Minus, "-"));
+            if (match('>')) {
+                tokens.push_back(makeToken(TokenKind::Arrow, "->"));
+            } else {
+                tokens.push_back(makeToken(TokenKind::Minus, "-"));
+            }
             break;
         case '*':
             tokens.push_back(makeToken(TokenKind::Star, "*"));
@@ -248,6 +255,9 @@ Token Lexer::lexIdentifierOrKeyword() {
     const std::string lexeme = source.substr(start, current - start);
     if (lexeme == "char") {
         return makeToken(TokenKind::KeywordChar, lexeme);
+    }
+    if (lexeme == "struct") {
+        return makeToken(TokenKind::KeywordStruct, lexeme);
     }
     if (lexeme == "short") {
         return makeToken(TokenKind::KeywordShort, lexeme);

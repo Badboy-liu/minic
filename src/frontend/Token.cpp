@@ -10,6 +10,8 @@ const char *tokenKindName(TokenKind kind) {
         return "number";
     case TokenKind::StringLiteral:
         return "string literal";
+    case TokenKind::KeywordStruct:
+        return "struct";
     case TokenKind::KeywordChar:
         return "char";
     case TokenKind::KeywordShort:
@@ -48,6 +50,10 @@ const char *tokenKindName(TokenKind kind) {
         return "[";
     case TokenKind::RightBracket:
         return "]";
+    case TokenKind::Dot:
+        return ".";
+    case TokenKind::Arrow:
+        return "->";
     case TokenKind::Semicolon:
         return ";";
     case TokenKind::Comma:

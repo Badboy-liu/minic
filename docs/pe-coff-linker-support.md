@@ -2,7 +2,7 @@
 
 This document describes the current built-in Windows PE/COFF linker in `minic`.
 
-It is intentionally small and teaching-oriented. The goal is not broad compatibility with arbitrary COFF producers. The goal is a clear model that matches the compiler's own NASM-generated AMD64 object files.
+It is intentionally small and focused. The goal is not broad compatibility with arbitrary COFF producers. The goal is a clear model that matches the compiler's own NASM-generated AMD64 object files.
 
 Linux executable linking is now a separate WSL-hosted system-linker path and remains outside the scope of this document.
 
@@ -82,7 +82,7 @@ Both globals may be referenced through the `.bss` section symbol with different 
 
 ### Unsupported/ignored sections
 
-Sections outside the linker's recognized subset are not part of the supported teaching model. If a relocation or symbol depends on one of those sections, linking can fail.
+Sections outside the linker's recognized subset are not part of the supported model. If a relocation or symbol depends on one of those sections, linking can fail.
 
 ## Symbol Resolution Model
 
@@ -109,7 +109,7 @@ This is enough to demonstrate real linker behavior for small multi-file examples
 The current linker supports:
 
 - AMD64 COFF `REL32` relocations applied from `.text`
-- AMD64 COFF `ADDR64` relocations applied from `.text` on the current teaching subset
+- AMD64 COFF `ADDR64` relocations applied from `.text` on the current supported helper-object subset
 - AMD64 COFF `ADDR64` relocations applied from initialized data sections in the current compiler-generated subset
 - PE32+ `DIR64` base relocation entries synthesized for supported absolute-address image slots
 
@@ -268,7 +268,7 @@ For `.bss`, virtual size matters but raw file size is zero, because the loader p
 
 For the current supported `ADDR64` subset, executables no longer rely on a fixed preferred image base. The linker now emits a PE `.reloc` table so loader-applied rebasing can adjust stored absolute addresses correctly.
 
-## Teaching Trace
+## Link Trace
 
 The linker now supports:
 
@@ -288,13 +288,12 @@ The trace prints six high-level blocks:
 4. resolved symbols
 5. relocations
 6. base relocations
-6. base relocations
 
 The trace is meant to explain what the linker is doing, not to dump the entire binary.
 
-Each block now begins with a short summary line so the teaching path is easier to skim before reading the detailed entries.
+Each block now begins with a short summary line so the trace is easier to skim before reading the detailed entries.
 
-In the input-object block, the linker now also prints the externally visible symbols and unresolved extern references that matter to the current teaching subset.
+In the input-object block, the linker now also prints the externally visible symbols and unresolved extern references that matter to the current supported subset.
 
 ## Manual Verification
 
@@ -339,7 +338,7 @@ The regression currently covers:
 - global pointer initializer relocations with `--link-trace`
 - function-pointer and function-pointer-table relocations with `--link-trace`
 - DLL-aware imports from `kernel32.dll` and `msvcrt.dll`
-- explicit linker-failure teaching cases such as duplicate symbols and unsupported relocation/section shapes
+- explicit linker-failure cases such as duplicate symbols and unsupported relocation/section shapes
 
 Each regression case is declared in `CMakeLists.txt`, where the test lists:
 
@@ -391,4 +390,4 @@ The current linker is expected to fail clearly for cases such as:
 - unsupported target section in a relocation
 - object metadata that is truncated or too small to be valid COFF
 
-These failures are part of the current teaching boundary. The diagnostics now prefer a `linker diagnostic:` prefix and include the relevant object path, symbol, or section when that context is available.
+These failures are part of the current documented boundary. The diagnostics now prefer a `linker diagnostic:` prefix and include the relevant object path, symbol, or section when that context is available.

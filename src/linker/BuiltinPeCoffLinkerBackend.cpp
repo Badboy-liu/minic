@@ -6,9 +6,10 @@
 
 void BuiltinPeCoffLinkerBackend::link(
     const ToolchainPaths &,
-    const TargetSpec &,
-    const std::vector<std::filesystem::path> &objPaths,
-    const std::filesystem::path &exePath,
-    bool traceLinker) const {
-    PeLinker::linkObjects(objPaths, exePath, traceLinker ? &std::cout : nullptr);
+    const LinkerInvocation &invocation) const {
+    PeLinker::linkObjects(
+        invocation.objPaths,
+        invocation.outputPath,
+        invocation.jobs,
+        invocation.traceLinker ? &std::cout : nullptr);
 }

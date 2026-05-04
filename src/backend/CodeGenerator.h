@@ -21,6 +21,14 @@ private:
         const char *r32;
         const char *r64;
     };
+    struct WindowsAbiArgument {
+        TypePtr type;
+        bool inRegister = false;
+        int registerIndex = -1;
+        int homeOffset = 0;
+        int stackSize = 0;
+        bool hiddenReturnPointer = false;
+    };
 
     void emitPrologue();
     void emitEntryPoint();
@@ -36,6 +44,22 @@ private:
     void emitSystemVCallExpr(const CallExpr &call);
     void emitAddress(const Expr &expr);
     std::string globalAddressInitializer(const Expr &expr);
+    bool supportsCurrentByValueStruct(const Type &type) const;
+    bool supportsCurrentStructInitializer(const Type &type) const;
+    bool isRegisterPassedStruct(const Type &type) const;
+    int alignStackSize(int size) const;
+    std::vector<WindowsAbiArgument> buildWindowsAbiArguments(const std::vector<TypePtr> &parameterTypes, bool includeHiddenReturnPointer) const;
+    int findHiddenReturnPointerLocalOffset(const Function &function) const;
+    int findLargeStructCallResultLocalOffset(const Function &function) const;
+    int currentFunctionFrameSize(const Function &function) const;
+    void emitCopyBytes(const std::string &destAddressExpr, const std::string &srcAddressExpr, int size);
+    void emitCopyStructValue(const Type &type, const std::string &destAddressExpr, const std::string &srcAddressExpr);
+    void emitLoadStructValueToRax(const Expr &expr);
+    void emitStoreStructValueFromRax(const Type &type, const std::string &destAddressExpr);
+    void emitGlobalStructInitializer(const GlobalVar &global, const InitializerListExpr *list);
+    void emitZeroFillBytes(std::ostringstream &line, int count, bool &first) const;
+    void emitGlobalStructMemberValue(std::ostringstream &line, const Type &type, const Expr &expr, bool &first);
+    void emitLocalStructInitializer(const DeclStmt &decl, const InitializerListExpr &list);
     void emitLocalStringInitializer(const DeclStmt &decl, const StringExpr &stringExpr);
     void emitLocalArrayInitializer(const DeclStmt &decl, const InitializerListExpr &list);
     void emitZeroLocalArrayElements(const Type &arrayType, int baseOffset, std::size_t startIndex);
@@ -69,5 +93,7 @@ private:
     std::vector<std::string> loopBreakLabels;
     const TargetSpec &target;
     bool emitProgramEntryPoint = true;
+    int activeHiddenReturnPointerOffset = 0;
+    int activeLargeStructCallResultOffset = 0;
     int labelCounter = 0;
 };

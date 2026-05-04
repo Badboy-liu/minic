@@ -10,7 +10,7 @@ std::string functionSymbol(const std::string &name) {
 
 }
 
-void SemanticAnalyzer::analyze(Program &program) {
+void SemanticAnalyzer::analyze(Program &program, bool requireMain) {
     bool hasMain = false;
     functions.clear();
     globals.clear();
@@ -77,7 +77,7 @@ void SemanticAnalyzer::analyze(Program &program) {
         }
     }
 
-    if (!hasMain) {
+    if (requireMain && !hasMain) {
         fail("program must define an 'int main()' function");
     }
 }
@@ -94,9 +94,13 @@ void SemanticAnalyzer::analyzeFunction(Function &function) {
         if (parameter.type->isVoid() || parameter.type->isArray() || parameter.type->isFunction()) {
             fail("unsupported parameter type in function " + function.name + ": " + typeName(parameter.type));
         }
+        if (parameter.type->isStruct() && !isSupportedByValueStructType(parameter.type)) {
+            fail("unsupported by-value struct parameter type in function " + function.name + ": " + typeName(parameter.type));
+        }
         if (scope.find(parameter.name) != scope.end()) {
             fail("duplicate parameter name in function " + function.name + ": " + parameter.name);
         }
+        nextStackOffset = alignTo(nextStackOffset, parameter.type->alignment());
         nextStackOffset += parameter.type->storageSize();
         parameter.stackOffset = nextStackOffset;
         scope.emplace(parameter.name, VariableSymbol{parameter.type, parameter.stackOffset});
@@ -170,6 +174,10 @@ void SemanticAnalyzer::analyzeGlobal(GlobalVar &global) {
     analyzeExpr(*global.init);
     if (global.type->isArray()) {
         validateArrayInitializer(global.name, global.type, *global.init, true);
+        return;
+    }
+    if (global.type->isStruct()) {
+        validateStructInitializer(global.name, global.type, *global.init, true);
         return;
     }
 
@@ -282,6 +290,68 @@ bool SemanticAnalyzer::isSupportedGlobalIntegerInitializer(const Expr &expr) con
     return true;
 }
 
+bool SemanticAnalyzer::isSupportedStructMemberType(const TypePtr &type) const {
+    return type->isInteger() || type->isPointer();
+}
+
+bool SemanticAnalyzer::isSupportedByValueStructType(const TypePtr &type) const {
+    if (!type->isStruct()) {
+        return true;
+    }
+    for (const auto &member : type->members) {
+        if (!isSupportedStructMemberType(member.type)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void SemanticAnalyzer::validateStructInitializer(
+    const std::string &name,
+    const TypePtr &structType,
+    Expr &init,
+    bool isGlobal) {
+    if (init.kind != Expr::Kind::InitializerList) {
+        fail(
+            std::string(isGlobal ? "global" : "local") +
+            " struct initializers currently support only one-level initializer lists: " + name);
+    }
+
+    const auto &list = static_cast<const InitializerListExpr &>(init);
+    if (list.elements.size() > structType->members.size()) {
+        fail("too many elements in " + std::string(isGlobal ? "global" : "local") + " struct initializer: " + name);
+    }
+
+    for (std::size_t i = 0; i < list.elements.size(); ++i) {
+        const StructMember &member = structType->members[i];
+        const Expr &element = *list.elements[i];
+        if (member.type->isArray() || member.type->isStruct()) {
+            fail(
+                std::string(isGlobal ? "global" : "local") +
+                " struct initializers do not yet support array or struct members: " + name);
+        }
+        if (element.kind == Expr::Kind::InitializerList) {
+            fail(
+                std::string(isGlobal ? "global" : "local") +
+                " struct initializers do not yet support nested aggregate elements: " + name);
+        }
+        if (!canAssign(member.type, element.type)) {
+            fail(
+                "struct initializer element type mismatch for " + name + "." + member.name +
+                ": expected " + typeName(member.type) + ", got " + typeName(element.type));
+        }
+        if (member.type->isPointer() && !isSupportedStaticPointerInitializer(element)) {
+            fail(
+                std::string(isGlobal ? "global" : "local") +
+                " struct pointer member initializers currently support only function names, '&function', '&global', or string literals: " +
+                name + "." + member.name);
+        }
+        if (isGlobal && member.type->isInteger() && !isSupportedGlobalIntegerInitializer(element)) {
+            fail("global struct integer member initializers currently support only integer constants: " + name + "." + member.name);
+        }
+    }
+}
+
 void SemanticAnalyzer::validateArrayInitializer(
     const std::string &name,
     const TypePtr &arrayType,
@@ -348,6 +418,9 @@ void SemanticAnalyzer::analyzeStatement(Stmt &stmt) {
                 fail("non-void function must return a value");
             }
             analyzeExpr(*returnStmt.expr);
+            if (currentReturnType->isStruct() && !isSupportedByValueStructType(currentReturnType)) {
+                fail("unsupported by-value struct return type: " + typeName(currentReturnType));
+            }
             if (!canAssign(currentReturnType, returnStmt.expr->type)) {
                 fail("return type mismatch: expected " + typeName(currentReturnType) + ", got " + typeName(returnStmt.expr->type));
             }
@@ -362,6 +435,10 @@ void SemanticAnalyzer::analyzeStatement(Stmt &stmt) {
         declareVariable(decl);
         if (decl.init) {
             analyzeExpr(*decl.init);
+            if (decl.type->isStruct()) {
+                validateStructInitializer(decl.name, decl.type, *decl.init, false);
+                break;
+            }
             if (decl.type->isArray()) {
                 validateArrayInitializer(decl.name, decl.type, *decl.init, false);
                 break;
@@ -632,6 +709,21 @@ void SemanticAnalyzer::analyzeExpr(Expr &expr) {
         expr.isLValue = true;
         return;
     }
+    case Expr::Kind::MemberAccess: {
+        auto &member = static_cast<MemberAccessExpr &>(expr);
+        analyzeExpr(*member.base);
+        if (!member.base->type->isStruct()) {
+            fail("member access requires a struct value");
+        }
+        const StructMember *resolved = member.base->type->findMember(member.memberName);
+        if (!resolved) {
+            fail("unknown struct member: " + member.memberName);
+        }
+        member.memberOffset = resolved->offset;
+        expr.type = resolved->type;
+        expr.isLValue = true;
+        return;
+    }
     }
 }
 
@@ -660,6 +752,7 @@ void SemanticAnalyzer::declareVariable(DeclStmt &decl) {
         }
     }
 
+    nextStackOffset = alignTo(nextStackOffset, decl.type->alignment());
     nextStackOffset += decl.type->storageSize();
     decl.stackOffset = nextStackOffset;
     scope.emplace(decl.name, VariableSymbol{decl.type, decl.stackOffset});
@@ -695,6 +788,13 @@ bool SemanticAnalyzer::canAssign(const TypePtr &target, const TypePtr &value) co
     if (target->isInteger() && decayedValue->isInteger()) {
         return true;
     }
+    if (target->isStruct() || decayedValue->isStruct()) {
+        return target->isStruct() &&
+            decayedValue->isStruct() &&
+            sameType(target, decayedValue) &&
+            isSupportedByValueStructType(target) &&
+            isSupportedByValueStructType(decayedValue);
+    }
     return sameType(target, decayedValue);
 }
 
@@ -706,6 +806,13 @@ bool SemanticAnalyzer::isEquivalentArgumentType(const TypePtr &param, const Type
     TypePtr decayedArg = decayType(arg);
     if (param->isInteger() && decayedArg->isInteger()) {
         return true;
+    }
+    if (param->isStruct() || decayedArg->isStruct()) {
+        return param->isStruct() &&
+            decayedArg->isStruct() &&
+            sameType(param, decayedArg) &&
+            isSupportedByValueStructType(param) &&
+            isSupportedByValueStructType(decayedArg);
     }
     return sameType(param, decayedArg);
 }
@@ -751,6 +858,8 @@ int SemanticAnalyzer::integerRank(const TypePtr &type) const {
 
 std::string SemanticAnalyzer::typeName(const TypePtr &type) const {
     switch (type->kind) {
+    case TypeKind::Struct:
+        return "struct " + type->structName;
     case TypeKind::Char:
         return "char";
     case TypeKind::Short:

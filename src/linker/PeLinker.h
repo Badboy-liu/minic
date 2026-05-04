@@ -9,9 +9,11 @@ public:
     static void linkSingleObject(
         const std::filesystem::path &objPath,
         const std::filesystem::path &exePath,
+        unsigned int jobs = 0,
         std::ostream *trace = nullptr);
     static void linkObjects(
         const std::vector<std::filesystem::path> &objPaths,
         const std::filesystem::path &exePath,
+        unsigned int jobs = 0,
         std::ostream *trace = nullptr);
 };

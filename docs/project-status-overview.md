@@ -1,6 +1,6 @@
 # Project Status Overview
 
-Date: 2026-04-28
+Date: 2026-04-30
 
 Document type:
 
@@ -9,11 +9,11 @@ Document type:
 
 ## Summary
 
-`minic` has moved beyond a front-end-only toy compiler and now works as a small end-to-end teaching compiler toolchain.
+`minic` has moved beyond a front-end-only toy compiler and now works as a small end-to-end hand-written compiler toolchain.
 
 The strongest part of the project is no longer just parsing or code generation in isolation. The biggest milestone is that the repository now demonstrates a complete path from a small C subset to NASM assembly, COFF object files, and a self-written PE linker that produces working Windows executables.
 
-At the same time, the project is still intentionally narrow in scope. It is best understood as a teaching-oriented compiler and linker prototype, not a broadly capable systems compiler.
+At the same time, the project is still intentionally narrow in scope. It is best understood as a focused hand-written compiler and linker prototype, not a broadly capable systems compiler.
 
 ## Status By Pipeline Stage
 
@@ -24,11 +24,13 @@ Current status:
 - lexer, parser, and semantic analysis are broadly stable for the currently supported C subset
 - the project now supports more than trivial single-function programs
 - multi-file functions, global variables, and `.bss`-backed tentative definitions are already integrated into the front-end-to-linker flow
+- multi-file front-end parsing now runs per-source-file in parallel before the combined semantic pass
+- compile and link parallelism is now user-controllable through explicit worker-count settings
 
 Assessment:
 
 - this part is no longer the main bottleneck
-- the supported language subset is still intentionally small, but the current boundary is usable and teachable
+- the supported language subset is still intentionally small, but the current boundary is usable and coherent
 
 Approximate maturity:
 
@@ -39,12 +41,14 @@ Approximate maturity:
 Current status:
 
 - Windows x64 code generation is the main working path
-- Linux support already exists for assembly and object emission
+- Linux support already exists for assembly, object emission, and WSL-hosted system linking
 - the target abstraction is strong enough to support multiple output targets at the code generation layer
+- multi-file code generation and object assembly now run per translation unit in parallel
+- serial and parallel code paths now share the same command-line worker-count model
 
 Assessment:
 
-- the code generator is good enough to support the teaching goals of the current project
+- the code generator is good enough to support the current project scope without being the main bottleneck
 - the main limitation here is feature breadth, not basic correctness on the supported path
 
 Approximate maturity:
@@ -69,27 +73,30 @@ Current status:
 - function-address `ADDR64` relocations from `.data` into `.text` now work on the current compiler-generated path
 - supported absolute-address image slots now emit PE `.reloc` metadata for rebasing
 - `.bss` section-symbol plus addend behavior has been debugged and fixed
-- teaching-oriented `--link-trace` output now exposes:
+- `--link-trace` output now exposes:
   - input objects
   - object-level symbols and extern references
   - merged sections
   - resolved symbols
   - relocations
-- automated regression coverage now exists for the current teaching phase
+- automated regression coverage now exists for the current active feature set
+- regression execution now goes through a GoogleTest-based native test runner instead of PowerShell-only harnesses
+- object-file loading and COFF parsing are now parallelized before the serial merge and relocation stages
+- linker backends now receive one shared invocation model instead of ad hoc target-specific argument plumbing
 
 Assessment:
 
 - this is the most distinctive and most valuable part of the project
-- this is where `minic` starts to feel like a real educational toolchain rather than only a compiler front end
+- this is where `minic` starts to feel like a real compiler toolchain rather than only a compiler front end
 
 Approximate maturity:
 
-- teaching-oriented PE/COFF linker: about 75%
+- current PE/COFF linker on the supported subset: about 75%
 - broader PE/COFF linker capability coverage: about 35% to 45%
 
 ## Strongest Area
 
-The strongest area in the project today is the end-to-end PE/COFF teaching chain.
+The strongest area in the project today is the end-to-end PE/COFF chain.
 
 That includes:
 
@@ -98,7 +105,7 @@ That includes:
 - COFF object emission through NASM
 - built-in PE linking
 - section-aware and relocation-aware debugging support
-- regression coverage for the current teaching examples
+- regression coverage for the current supported examples
 
 This is the part of the project with the clearest identity.
 
@@ -119,7 +126,7 @@ The main weak spots are:
 
 The weakest engineering area is the depth of regression coverage relative to future linker growth.
 
-Recent work added useful automated tests for the current teaching phase, but the coverage is still concentrated on the current happy path:
+Recent work added useful automated tests for the current phase, but the coverage is still concentrated on the current happy path:
 
 - baseline single-file linking
 - `.bss` integrity
@@ -135,8 +142,8 @@ The next wave of growth will need:
 
 The project is now best described as:
 
-- a teachable, working end-to-end educational compiler toolchain
-- a strong PE/COFF linker teaching prototype
+- a working, inspectable end-to-end hand-written compiler toolchain
+- a strong PE/COFF linker prototype
 - not yet a broadly capable small systems compiler
 
 Approximate overall maturity:
@@ -154,7 +161,7 @@ The most natural next step is to keep improving the PE/COFF linker, because that
 Recommended priority order:
 
 1. Expand relocation coverage
-2. Add more failure-case teaching and regression samples
+2. Add more failure-case and regression samples
 3. Extend import handling and file-backed catalog flexibility
 
 ## Short Version

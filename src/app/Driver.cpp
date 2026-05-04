@@ -2,27 +2,103 @@
 
 #include "CodeGenerator.h"
 #include "Lexer.h"
+#include "Optimizer.h"
 #include "Parser.h"
 #include "Semantics.h"
 #include "Toolchain.h"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <stdexcept>
+#include <thread>
 #include <unordered_set>
 #include <utility>
 
 namespace fs = std::filesystem;
 
+namespace {
+
+unsigned int detectedParallelism() {
+    const unsigned int detected = std::thread::hardware_concurrency();
+    return detected == 0 ? 4u : detected;
+}
+
+unsigned int workerCountFor(std::size_t taskCount, unsigned int requestedJobs) {
+    if (taskCount <= 1) {
+        return 1;
+    }
+
+    const unsigned int available = requestedJobs == 0 ? detectedParallelism() : requestedJobs;
+    return static_cast<unsigned int>(std::min<std::size_t>(taskCount, available));
+}
+
+template <typename Result, typename Factory>
+std::vector<Result> runParallelTasks(std::size_t taskCount, unsigned int requestedJobs, Factory &&factory) {
+    std::vector<Result> results;
+    results.reserve(taskCount);
+    if (taskCount == 0) {
+        return results;
+    }
+
+    if (workerCountFor(taskCount, requestedJobs) == 1) {
+        for (std::size_t i = 0; i < taskCount; ++i) {
+            results.push_back(factory(i)());
+        }
+        return results;
+    }
+
+    std::vector<std::future<Result>> futures;
+    futures.reserve(taskCount);
+    for (std::size_t i = 0; i < taskCount; ++i) {
+        futures.push_back(std::async(std::launch::async, factory(i)));
+    }
+    for (auto &future : futures) {
+        results.push_back(future.get());
+    }
+    return results;
+}
+
+struct ParsedTranslationUnit {
+    Program program;
+    std::size_t functionCount = 0;
+    std::size_t globalCount = 0;
+};
+
+struct PreparedTranslationUnit {
+    Program program;
+    fs::path asmPath;
+    fs::path objPath;
+    bool emitEntryPoint = false;
+};
+
+struct GeneratedTranslationUnit {
+    fs::path asmPath;
+    fs::path objPath;
+    bool producedObject = false;
+};
+
+struct PreparedAssemblyInput {
+    fs::path asmPath;
+    fs::path objPath;
+};
+
+} // namespace
+
 int Driver::run(const fs::path &selfPath, const std::vector<std::string> &args) {
     const Options options = parseOptions(args);
     const TargetSpec &target = targetSpec(options.target);
+    const unsigned int requestedJobs = sanitizeJobs(options.jobs);
     std::vector<fs::path> sourceInputs;
+    std::vector<fs::path> assemblyInputs;
     std::vector<fs::path> objectInputs;
     for (const auto &inputPath : options.inputPaths) {
         if (isObjectInput(inputPath)) {
             objectInputs.push_back(inputPath);
+        } else if (isAssemblyInput(inputPath)) {
+            assemblyInputs.push_back(inputPath);
         } else {
             sourceInputs.push_back(inputPath);
         }
@@ -30,21 +106,39 @@ int Driver::run(const fs::path &selfPath, const std::vector<std::string> &args) 
     if (!objectInputs.empty() && (options.assemblyOnly || options.compileOnly)) {
         throw std::runtime_error("existing object inputs are only supported for final linking");
     }
+    if (!assemblyInputs.empty() && options.assemblyOnly) {
+        throw std::runtime_error("assembly inputs cannot be used with -S; they are already assembly sources");
+    }
+    if (!assemblyInputs.empty() && !target.supportsAssemblyInputs) {
+        throw std::runtime_error(std::string("target does not support direct assembly inputs: ") + target.name);
+    }
 
     Program combinedProgram;
     std::vector<std::size_t> functionCounts;
     std::vector<std::size_t> globalCounts;
-    for (const auto &inputPath : sourceInputs) {
-        const std::string source = readFile(inputPath);
-        Lexer lexer(source);
-        Parser parser(lexer.tokenize());
-        Program fileProgram = parser.parseProgram();
-        functionCounts.push_back(fileProgram.functions.size());
-        globalCounts.push_back(fileProgram.globals.size());
-        for (auto &function : fileProgram.functions) {
+    std::vector<ParsedTranslationUnit> parsedUnits =
+        runParallelTasks<ParsedTranslationUnit>(sourceInputs.size(), requestedJobs, [&](std::size_t index) {
+            return [&, index]() {
+                const std::string source = readFile(sourceInputs[index]);
+                Lexer lexer(source);
+                Parser parser(lexer.tokenize());
+                Program fileProgram = parser.parseProgram();
+
+                ParsedTranslationUnit unit;
+                unit.functionCount = fileProgram.functions.size();
+                unit.globalCount = fileProgram.globals.size();
+                unit.program = std::move(fileProgram);
+                return unit;
+            };
+        });
+
+    for (auto &parsedUnit : parsedUnits) {
+        functionCounts.push_back(parsedUnit.functionCount);
+        globalCounts.push_back(parsedUnit.globalCount);
+        for (auto &function : parsedUnit.program.functions) {
             combinedProgram.functions.push_back(std::move(function));
         }
-        for (auto &global : fileProgram.globals) {
+        for (auto &global : parsedUnit.program.globals) {
             combinedProgram.globals.push_back(std::move(global));
         }
     }
@@ -53,7 +147,10 @@ int Driver::run(const fs::path &selfPath, const std::vector<std::string> &args) 
     std::vector<GlobalVar> globalVariables;
     if (!sourceInputs.empty()) {
         SemanticAnalyzer semanticAnalyzer;
-        semanticAnalyzer.analyze(combinedProgram);
+        const bool requireMain = !options.assemblyOnly && !options.compileOnly;
+        semanticAnalyzer.analyze(combinedProgram, requireMain);
+        Optimizer optimizer;
+        optimizer.optimize(combinedProgram);
 
         for (const auto &function : combinedProgram.functions) {
             if (!function.isDeclaration()) {
@@ -74,7 +171,6 @@ int Driver::run(const fs::path &selfPath, const std::vector<std::string> &args) 
         }
     }
 
-    CodeGenerator generator(options.target);
     const fs::path outputDirectory = options.outputPath.parent_path().empty()
         ? fs::path(".")
         : options.outputPath.parent_path();
@@ -82,6 +178,10 @@ int Driver::run(const fs::path &selfPath, const std::vector<std::string> &args) 
 
     std::vector<fs::path> generatedObjPaths;
     std::vector<fs::path> objPaths;
+    std::vector<PreparedTranslationUnit> preparedUnits;
+    std::vector<PreparedAssemblyInput> preparedAssemblyInputs;
+    preparedUnits.reserve(sourceInputs.size());
+    preparedAssemblyInputs.reserve(assemblyInputs.size());
     std::size_t functionOffset = 0;
     std::size_t globalOffset = 0;
     bool emittedEntryPoint = false;
@@ -151,16 +251,69 @@ int Driver::run(const fs::path &selfPath, const std::vector<std::string> &args) 
             ? options.outputPath
             : outputDirectory / (stem.string() + objectExtension);
 
-        const std::string assembly = generator.generate(fileProgram, emitEntryPoint);
-        writeFile(asmPath, assembly);
-        std::cout << "Generated assembly: " << asmPath.string() << '\n';
+        PreparedTranslationUnit unit;
+        unit.program = std::move(fileProgram);
+        unit.asmPath = asmPath;
+        unit.objPath = objPath;
+        unit.emitEntryPoint = emitEntryPoint;
+        preparedUnits.push_back(std::move(unit));
+    }
 
-        if (!options.assemblyOnly) {
-            Toolchain::assembleObject(toolchain, options.target, asmPath, objPath);
-            objPaths.push_back(objPath);
-            generatedObjPaths.push_back(objPath);
-            std::cout << "Generated object: " << objPath.string() << '\n';
+    const std::vector<GeneratedTranslationUnit> generatedUnits =
+        runParallelTasks<GeneratedTranslationUnit>(preparedUnits.size(), requestedJobs, [&](std::size_t index) {
+            return [&, index]() mutable {
+                PreparedTranslationUnit unit = std::move(preparedUnits[index]);
+                CodeGenerator generator(options.target);
+                const std::string assembly = generator.generate(unit.program, unit.emitEntryPoint);
+                writeFile(unit.asmPath, assembly);
+
+                GeneratedTranslationUnit generated;
+                generated.asmPath = unit.asmPath;
+                generated.objPath = unit.objPath;
+                if (!options.assemblyOnly) {
+                    Toolchain::assembleObject(toolchain, options.target, unit.asmPath, unit.objPath);
+                    generated.producedObject = true;
+                }
+                return generated;
+            };
+        });
+
+    for (const auto &generated : generatedUnits) {
+        std::cout << "Generated assembly: " << generated.asmPath.string() << '\n';
+        if (generated.producedObject) {
+            objPaths.push_back(generated.objPath);
+            generatedObjPaths.push_back(generated.objPath);
+            std::cout << "Generated object: " << generated.objPath.string() << '\n';
         }
+    }
+
+    for (std::size_t i = 0; i < assemblyInputs.size(); ++i) {
+        const fs::path stem = assemblyInputs[i].stem();
+        const fs::path objPath =
+            (!multipleInputs && sourceInputs.empty() && assemblyInputs.size() == 1 && options.compileOnly)
+            ? options.outputPath
+            : outputDirectory / (stem.string() + objectExtension);
+        preparedAssemblyInputs.push_back(PreparedAssemblyInput{assemblyInputs[i], objPath});
+    }
+
+    const std::vector<GeneratedTranslationUnit> assembledInputs =
+        runParallelTasks<GeneratedTranslationUnit>(preparedAssemblyInputs.size(), requestedJobs, [&](std::size_t index) {
+            return [&, index]() {
+                const PreparedAssemblyInput &unit = preparedAssemblyInputs[index];
+                Toolchain::assembleObject(toolchain, options.target, unit.asmPath, unit.objPath);
+                GeneratedTranslationUnit generated;
+                generated.asmPath = unit.asmPath;
+                generated.objPath = unit.objPath;
+                generated.producedObject = true;
+                return generated;
+            };
+        });
+
+    for (const auto &generated : assembledInputs) {
+        objPaths.push_back(generated.objPath);
+        generatedObjPaths.push_back(generated.objPath);
+        std::cout << "Assembled input: " << generated.asmPath.string() << '\n';
+        std::cout << "Generated object: " << generated.objPath.string() << '\n';
     }
 
     objPaths.insert(objPaths.end(), objectInputs.begin(), objectInputs.end());
@@ -175,10 +328,11 @@ int Driver::run(const fs::path &selfPath, const std::vector<std::string> &args) 
 
     Toolchain::invokeExternalLinker(
         linkerExecutablePath(selfPath),
-        options.target,
+        target,
         objPaths,
         options.outputPath,
-        options.linkTrace);
+        options.linkTrace,
+        requestedJobs);
 
     if (!options.keepObject) {
         for (const auto &objPath : generatedObjPaths) {
@@ -215,6 +369,13 @@ Driver::Options Driver::parseOptions(const std::vector<std::string> &args) const
             options.keepObject = true;
         } else if (args[i] == "--link-trace") {
             options.linkTrace = true;
+        } else if (args[i] == "-j" || args[i] == "--jobs") {
+            if (i + 1 >= args.size()) {
+                throw std::runtime_error("missing worker count after " + args[i]);
+            }
+            options.jobs = sanitizeJobs(static_cast<unsigned int>(std::stoul(args[++i])));
+        } else if (args[i].rfind("-j", 0) == 0 && args[i].size() > 2) {
+            options.jobs = sanitizeJobs(static_cast<unsigned int>(std::stoul(args[i].substr(2))));
         } else if (args[i] == "-S") {
             options.assemblyOnly = true;
             options.keepObject = true;
@@ -277,6 +438,11 @@ bool Driver::isObjectInput(const fs::path &path) {
     return extension == ".obj" || extension == ".o";
 }
 
+bool Driver::isAssemblyInput(const fs::path &path) {
+    const std::string extension = path.extension().string();
+    return extension == ".asm";
+}
+
 std::string Driver::readFile(const fs::path &path) {
     std::ifstream in(path, std::ios::binary);
     if (!in) {
@@ -298,6 +464,13 @@ void Driver::writeFile(const fs::path &path, const std::string &content) {
     out << content;
 }
 
+unsigned int Driver::sanitizeJobs(unsigned int requestedJobs) {
+    if (requestedJobs == 0) {
+        return detectedParallelism();
+    }
+    return requestedJobs;
+}
+
 std::string Driver::usage() {
-    return "Usage: minic <input.c>... [--target x86_64-windows|x86_64-linux] [-S] [-c] [-o output] [--emit-asm output.asm] [--keep-obj] [--link-trace]";
+    return "Usage: minic <input.c|input.asm|input.obj|input.o>... [--target x86_64-windows|x86_64-linux] [-S] [-c] [-o output] [--emit-asm output.asm] [--keep-obj] [--link-trace] [-j N|--jobs N]";
 }

@@ -1,10 +1,12 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 enum class TypeKind {
+    Struct,
     Char,
     Short,
     Int,
@@ -19,34 +21,72 @@ enum class TypeKind {
 struct Type;
 using TypePtr = std::shared_ptr<Type>;
 
+struct StructMember {
+    std::string name;
+    TypePtr type;
+    int offset = 0;
+};
+
 struct Type {
     TypeKind kind;
     TypePtr elementType;
     int arrayLength = 0;
     std::vector<TypePtr> parameterTypes;
+    std::string structName;
+    std::vector<StructMember> members;
+    int structSize = 0;
+    int structAlignment = 1;
+
+    static int alignTo(int value, int alignment) {
+        return (value + alignment - 1) / alignment * alignment;
+    }
+
+    static TypePtr makeStruct(std::string name, std::vector<StructMember> membersValue) {
+        int size = 0;
+        int alignment = 1;
+        for (auto &member : membersValue) {
+            const int memberAlignment = member.type->alignment();
+            size = alignTo(size, memberAlignment);
+            member.offset = size;
+            size += member.type->valueSize();
+            if (memberAlignment > alignment) {
+                alignment = memberAlignment;
+            }
+        }
+        size = alignTo(size, alignment);
+        return std::make_shared<Type>(Type{
+            TypeKind::Struct,
+            nullptr,
+            0,
+            {},
+            std::move(name),
+            std::move(membersValue),
+            size,
+            alignment});
+    }
 
     static TypePtr makeInt() {
-        return std::make_shared<Type>(Type{TypeKind::Int, nullptr, 0, {}});
+        return std::make_shared<Type>(Type{TypeKind::Int, nullptr, 0, {}, "", {}, 0, 1});
     }
 
     static TypePtr makeChar() {
-        return std::make_shared<Type>(Type{TypeKind::Char, nullptr, 0, {}});
+        return std::make_shared<Type>(Type{TypeKind::Char, nullptr, 0, {}, "", {}, 0, 1});
     }
 
     static TypePtr makeShort() {
-        return std::make_shared<Type>(Type{TypeKind::Short, nullptr, 0, {}});
+        return std::make_shared<Type>(Type{TypeKind::Short, nullptr, 0, {}, "", {}, 0, 1});
     }
 
     static TypePtr makeLong() {
-        return std::make_shared<Type>(Type{TypeKind::Long, nullptr, 0, {}});
+        return std::make_shared<Type>(Type{TypeKind::Long, nullptr, 0, {}, "", {}, 0, 1});
     }
 
     static TypePtr makeLongLong() {
-        return std::make_shared<Type>(Type{TypeKind::LongLong, nullptr, 0, {}});
+        return std::make_shared<Type>(Type{TypeKind::LongLong, nullptr, 0, {}, "", {}, 0, 1});
     }
 
     static TypePtr makeVoid() {
-        return std::make_shared<Type>(Type{TypeKind::Void, nullptr, 0, {}});
+        return std::make_shared<Type>(Type{TypeKind::Void, nullptr, 0, {}, "", {}, 0, 1});
     }
 
     static TypePtr makeFunction(TypePtr returnType, std::vector<TypePtr> parameterTypesValue) {
@@ -54,20 +94,27 @@ struct Type {
             TypeKind::Function,
             std::move(returnType),
             0,
-            std::move(parameterTypesValue)});
+            std::move(parameterTypesValue),
+            "",
+            {},
+            0,
+            1});
     }
 
     static TypePtr makePointer(TypePtr element) {
-        return std::make_shared<Type>(Type{TypeKind::Pointer, std::move(element), 0, {}});
+        return std::make_shared<Type>(Type{TypeKind::Pointer, std::move(element), 0, {}, "", {}, 0, 1});
     }
 
     static TypePtr makeArray(TypePtr element, int length) {
-        return std::make_shared<Type>(Type{TypeKind::Array, std::move(element), length, {}});
+        return std::make_shared<Type>(Type{TypeKind::Array, std::move(element), length, {}, "", {}, 0, 1});
     }
 
     bool equals(const Type &other) const {
         if (kind != other.kind || arrayLength != other.arrayLength || parameterTypes.size() != other.parameterTypes.size()) {
             return false;
+        }
+        if (kind == TypeKind::Struct) {
+            return structName == other.structName;
         }
         for (std::size_t i = 0; i < parameterTypes.size(); ++i) {
             if (!parameterTypes[i] || !other.parameterTypes[i]) {
@@ -97,6 +144,10 @@ struct Type {
             kind == TypeKind::LongLong;
     }
 
+    bool isStruct() const {
+        return kind == TypeKind::Struct;
+    }
+
     bool isVoid() const {
         return kind == TypeKind::Void;
     }
@@ -117,8 +168,19 @@ struct Type {
         return isInteger() || isPointer();
     }
 
+    const StructMember *findMember(const std::string &name) const {
+        for (const auto &member : members) {
+            if (member.name == name) {
+                return &member;
+            }
+        }
+        return nullptr;
+    }
+
     int valueSize() const {
         switch (kind) {
+        case TypeKind::Struct:
+            return structSize;
         case TypeKind::Char:
             return 1;
         case TypeKind::Short:
@@ -139,8 +201,31 @@ struct Type {
         return 0;
     }
 
+    int alignment() const {
+        switch (kind) {
+        case TypeKind::Struct:
+            return structAlignment;
+        case TypeKind::Array:
+            return elementType->alignment();
+        case TypeKind::Pointer:
+        case TypeKind::LongLong:
+            return 8;
+        case TypeKind::Short:
+            return 2;
+        case TypeKind::Char:
+            return 1;
+        case TypeKind::Int:
+        case TypeKind::Long:
+            return 4;
+        case TypeKind::Void:
+        case TypeKind::Function:
+            return 1;
+        }
+        return 1;
+    }
+
     int storageSize() const {
-        if (kind == TypeKind::Array) {
+        if (kind == TypeKind::Array || kind == TypeKind::Struct) {
             return valueSize();
         }
         return valueSize() <= 4 ? 8 : valueSize();
@@ -190,7 +275,8 @@ struct Expr {
         InitializerList,
         Assign,
         Call,
-        Index
+        Index,
+        MemberAccess
     };
 
     explicit Expr(Kind kindValue) : kind(kindValue) {}
@@ -271,6 +357,15 @@ struct IndexExpr : Expr {
 
     std::unique_ptr<Expr> base;
     std::unique_ptr<Expr> index;
+};
+
+struct MemberAccessExpr : Expr {
+    MemberAccessExpr(std::unique_ptr<Expr> baseValue, std::string memberNameValue)
+        : Expr(Kind::MemberAccess), base(std::move(baseValue)), memberName(std::move(memberNameValue)) {}
+
+    std::unique_ptr<Expr> base;
+    std::string memberName;
+    int memberOffset = 0;
 };
 
 struct Stmt {

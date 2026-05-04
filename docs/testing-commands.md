@@ -16,6 +16,8 @@ cmake --preset default
 cmake --build --preset debug
 ```
 
+On Windows, the current regression runner depends on GoogleTest being available through `vcpkg`. The CMake setup first checks `VCPKG_ROOT`, then falls back to `D:/vcpkg` when that local path exists.
+
 If you want CTest to print failing case output, keep `--output-on-failure`:
 
 ```powershell
@@ -28,6 +30,19 @@ Run the full current regression suite:
 
 ```powershell
 ctest --preset phase-current
+ctest --preset phase-current-parallel
+```
+
+Run only the module you are changing:
+
+```powershell
+ctest --preset frontend
+ctest --preset frontend-parallel
+ctest --preset backend
+ctest --preset backend-parallel
+ctest --preset linker
+ctest --preset linker-parallel
+ctest --preset optimizer
 ```
 
 Run the focused preset groups:
@@ -35,10 +50,31 @@ Run the focused preset groups:
 ```powershell
 ctest --preset bss
 ctest --preset imports
+ctest --preset imports-parallel
 ctest --preset relocations
+ctest --preset relocations-parallel
 ctest --preset rebasing
 ctest --preset linker-failures
+ctest --preset linker-failures-parallel
 ctest --preset linux-link
+ctest --preset linux-link-parallel
+ctest --preset multifile
+ctest --preset multifile-parallel
+```
+
+If you want to split the suite into smaller batches and run them on separate terminals, a practical layout is:
+
+```powershell
+ctest --preset imports-parallel
+ctest --preset relocations-parallel
+ctest --preset linker-failures-parallel
+ctest --preset linux-link-parallel
+```
+
+Or use plain CTest parallelism directly:
+
+```powershell
+ctest --test-dir .\build -C Debug -L phase-current -j 8 --output-on-failure
 ```
 
 List all configured Debug tests without running them:
@@ -57,18 +93,46 @@ ctest --test-dir .\build -C Debug -R "^minic_import_file_backed$" --output-on-fa
 
 - `phase-current`
   Runs the main current-stage regression set.
+- `phase-current-parallel`
+  Runs the same phase-current suite with preset parallelism enabled.
+- `frontend`
+  Runs parser, semantic-analysis, type-checking, initializer, and current struct-front-end cases.
+- `frontend-parallel`
+  Runs the same frontend-focused suite with preset parallelism enabled.
+- `backend`
+  Runs code-generation, ABI, assembler-input, Linux backend, and optimizer-adjacent backend cases.
+- `backend-parallel`
+  Runs the same backend-focused suite with preset parallelism enabled.
+- `linker`
+  Runs standalone-linker, import, relocation, rebasing, Linux final-link, and explicit linker-failure cases.
+- `linker-parallel`
+  Runs the same linker-focused suite with preset parallelism enabled.
+- `optimizer`
+  Runs optimizer-specific regression coverage.
 - `bss`
   Runs only `minic_bss_integrity`.
 - `imports`
   Runs all import-related positive and negative linker cases.
+- `imports-parallel`
+  Runs the import group with preset parallelism enabled.
 - `relocations`
   Runs relocation and function-pointer related cases.
+- `relocations-parallel`
+  Runs the relocation group with preset parallelism enabled.
 - `rebasing`
   Runs `.reloc` / base-relocation verification cases.
 - `linker-failures`
   Runs explicit linker failure-path regressions.
+- `linker-failures-parallel`
+  Runs the linker-failure group with preset parallelism enabled.
 - `linux-link`
-  Runs the Linux system-linker teaching path through WSL when available.
+  Runs the Linux system-linker path through WSL when available.
+- `linux-link-parallel`
+  Runs the Linux-link group with preset parallelism enabled.
+- `multifile`
+  Runs the multi-file compile and standalone-linker cases.
+- `multifile-parallel`
+  Runs the multi-file group with preset parallelism enabled.
 
 ## Full Test Case List
 
@@ -155,6 +219,15 @@ ctest --test-dir .\build -C Debug -R "^<test-name>$" --output-on-failure
 
 ## Useful Command Patterns
 
+If you change only one module, use the matching label directly:
+
+```powershell
+ctest --test-dir .\build -C Debug -L frontend --output-on-failure
+ctest --test-dir .\build -C Debug -L backend --output-on-failure
+ctest --test-dir .\build -C Debug -L linker --output-on-failure
+ctest --test-dir .\build -C Debug -L optimizer --output-on-failure
+```
+
 Run all import tests with explicit Debug selection instead of presets:
 
 ```powershell
@@ -183,5 +256,6 @@ ctest --test-dir .\build -C Debug -L linux-link --output-on-failure
 
 - Test declarations live in [CMakeLists.txt](../CMakeLists.txt).
 - Preset definitions live in [CMakePresets.json](../CMakePresets.json).
-- Many regression cases use helper scripts under [tests](../tests/).
+- The regression suite is now GoogleTest-driven. CTest still runs named cases and presets, but the underlying assertions live in [tests/minic_regression_tests.cpp](../tests/minic_regression_tests.cpp) and [tests/regression_test_utils.cpp](../tests/regression_test_utils.cpp).
+- The older PowerShell harness scripts under [tests](../tests/) are no longer the primary execution path.
 - Linux-link cases require WSL with `gcc`; they are skipped automatically when unavailable.

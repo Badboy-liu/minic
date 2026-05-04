@@ -38,6 +38,8 @@ param(
 
     [switch]$SkipRun,
 
+    [switch]$PreassembleAsmInputs,
+
     [string]$RequiredErrorMarkers = ""
 )
 
@@ -58,7 +60,7 @@ function Split-List {
     return @($Value.Split(';') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 }
 
-function Find-Nasm {
+function Find-Assembler {
     $candidates = @(
         "D:/software/nasm/nasm.exe",
         "C:/Program Files/NASM/nasm.exe"
@@ -74,7 +76,7 @@ function Find-Nasm {
         return $command.Source
     }
 
-    throw "Could not find nasm.exe for assembly-backed regression case"
+    throw "Could not find a compatible assembler executable for assembly-backed regression case"
 }
 
 function Convert-AsmToObjectPath {
@@ -92,9 +94,9 @@ function Assemble-InputObject {
         [string]$AsmPath
     )
 
-    $nasm = Find-Nasm
+    $assembler = Find-Assembler
     $objPath = Convert-AsmToObjectPath $AsmPath
-    & $nasm -f win64 -o $objPath $AsmPath 2>&1 | Out-String | Out-Null
+    & $assembler -f win64 -o $objPath $AsmPath 2>&1 | Out-String | Out-Null
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to assemble regression object: $AsmPath"
     }
@@ -259,29 +261,36 @@ function Enter-CatalogFixture {
     )
 
     if ([string]::IsNullOrWhiteSpace($FixturePath)) {
+        if (Test-Path env:MINIC_IMPORT_CATALOG) {
+            $state = @{
+                PreviousValue = $env:MINIC_IMPORT_CATALOG
+                HadPreviousValue = $true
+                FixturePath = $null
+                ClearOnly = $true
+            }
+            Remove-Item env:MINIC_IMPORT_CATALOG
+            return $state
+        }
         return $null
     }
 
-    $targetPath = Join-Path $RepoRoot "config/import_catalog.txt"
     $resolvedFixture = Join-Path $RepoRoot $FixturePath
     if (-not (Test-Path $resolvedFixture)) {
         throw "Catalog fixture does not exist: $resolvedFixture"
     }
 
     $state = @{
-        TargetPath = $targetPath
-        BackupExists = Test-Path $targetPath
-        BackupText = $null
+        PreviousValue = $null
+        HadPreviousValue = $false
+        FixturePath = $resolvedFixture
+        ClearOnly = $false
     }
-    if ($state.BackupExists) {
-        $state.BackupText = Get-Content -Path $targetPath -Raw
+    if (Test-Path env:MINIC_IMPORT_CATALOG) {
+        $state.HadPreviousValue = $true
+        $state.PreviousValue = $env:MINIC_IMPORT_CATALOG
     }
 
-    $targetDirectory = Split-Path -Parent $targetPath
-    if (-not (Test-Path $targetDirectory)) {
-        New-Item -ItemType Directory -Force -Path $targetDirectory | Out-Null
-    }
-    Copy-Item -LiteralPath $resolvedFixture -Destination $targetPath -Force
+    $env:MINIC_IMPORT_CATALOG = $resolvedFixture
     return $state
 }
 
@@ -294,13 +303,13 @@ function Exit-CatalogFixture {
         return
     }
 
-    if ($State.BackupExists) {
-        Set-Content -Path $State.TargetPath -Value $State.BackupText -NoNewline
+    if ($State.HadPreviousValue) {
+        $env:MINIC_IMPORT_CATALOG = $State.PreviousValue
         return
     }
 
-    if (Test-Path $State.TargetPath) {
-        Remove-Item -LiteralPath $State.TargetPath -Force
+    if (Test-Path env:MINIC_IMPORT_CATALOG) {
+        Remove-Item env:MINIC_IMPORT_CATALOG
     }
 }
 
@@ -314,7 +323,7 @@ try {
     $compilerInvocation = @()
     foreach ($source in (Split-List $SourceFiles)) {
         $resolvedPath = Join-Path $RepoRoot $source
-        if ([IO.Path]::GetExtension($resolvedPath) -eq ".asm") {
+        if ($PreassembleAsmInputs -and [IO.Path]::GetExtension($resolvedPath) -eq ".asm") {
             $compilerInvocation += (Assemble-InputObject $resolvedPath)
         } else {
             $compilerInvocation += $resolvedPath

@@ -11,10 +11,10 @@ namespace fs = std::filesystem;
 
 void WslGccElfLinkerBackend::link(
     const ToolchainPaths &paths,
-    const TargetSpec &target,
-    const std::vector<fs::path> &objPaths,
-    const fs::path &exePath,
-    bool) const {
+    const LinkerInvocation &invocation) const {
+    const TargetSpec &target = *invocation.target;
+    const std::vector<fs::path> &objPaths = invocation.objPaths;
+    const fs::path &exePath = invocation.outputPath;
     validateObjectInputs(target, objPaths);
 
     if (paths.wsl.empty()) {

@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <optional>
 #include <memory>
+#include <unordered_map>
 #include <vector>
 
 class Parser {
@@ -20,6 +21,8 @@ private:
         TypePtr type;
     };
 
+    Parameter parseParameter();
+    TypePtr parseStructType();
     void parseExternalDeclaration(Program &program);
     Function parseFunction(TypePtr returnType, std::string name);
     GlobalVar parseGlobalVariable(TypePtr declaredType, std::string name, bool isExternStorage);
@@ -61,5 +64,6 @@ private:
     [[noreturn]] void fail(const Token &token, const std::string &message) const;
 
     std::vector<Token> tokens;
+    std::unordered_map<std::string, TypePtr> structTypes;
     std::size_t current;
 };

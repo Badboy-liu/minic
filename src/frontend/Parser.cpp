@@ -51,22 +51,15 @@ Function Parser::parseFunction(TypePtr returnType, std::string name) {
         if (check(TokenKind::KeywordVoid)) {
             TypePtr probe = parseBaseType();
             if (!check(TokenKind::RightParen)) {
-                while (match(TokenKind::Star)) {
-                    probe = Type::makePointer(probe);
-                }
-                const Token &paramName = consume(TokenKind::Identifier, "expected parameter name");
-                function.parameters.push_back(Parameter{std::move(probe), paramName.lexeme, 0});
+                ParsedDeclarator declarator = parseVariableDeclarator(std::move(probe));
+                function.parameters.push_back(Parameter{std::move(declarator.type), std::move(declarator.name), 0});
                 while (match(TokenKind::Comma)) {
-                    TypePtr paramType = parseType();
-                    const Token &nextName = consume(TokenKind::Identifier, "expected parameter name");
-                    function.parameters.push_back(Parameter{std::move(paramType), nextName.lexeme, 0});
+                    function.parameters.push_back(parseParameter());
                 }
             }
         } else {
             do {
-                TypePtr paramType = parseType();
-                const Token &paramName = consume(TokenKind::Identifier, "expected parameter name");
-                function.parameters.push_back(Parameter{std::move(paramType), paramName.lexeme, 0});
+                function.parameters.push_back(parseParameter());
             } while (match(TokenKind::Comma));
         }
     }
@@ -78,6 +71,43 @@ Function Parser::parseFunction(TypePtr returnType, std::string name) {
 
     function.body = parseBlock();
     return function;
+}
+
+Parameter Parser::parseParameter() {
+    ParsedDeclarator declarator = parseVariableDeclarator(parseBaseType());
+    return Parameter{std::move(declarator.type), std::move(declarator.name), 0};
+}
+
+TypePtr Parser::parseStructType() {
+    const Token &nameToken = consume(TokenKind::Identifier, "expected struct tag");
+    const std::string structName = nameToken.lexeme;
+
+    if (!match(TokenKind::LeftBrace)) {
+        const auto found = structTypes.find(structName);
+        if (found == structTypes.end()) {
+            fail(nameToken, "unknown struct type: " + structName);
+        }
+        return found->second;
+    }
+
+    std::vector<StructMember> members;
+    if (structTypes.find(structName) != structTypes.end()) {
+        fail(nameToken, "duplicate struct definition: " + structName);
+    }
+    while (!check(TokenKind::RightBrace)) {
+        TypePtr memberBaseType = parseBaseType();
+        ParsedDeclarator declarator = parseVariableDeclarator(std::move(memberBaseType));
+        consume(TokenKind::Semicolon, "expected ';' after struct member declaration");
+        if (declarator.type->isVoid() || declarator.type->isFunction() || declarator.type->isArray()) {
+            fail(peek(), "unsupported struct member type for " + declarator.name);
+        }
+        members.push_back(StructMember{std::move(declarator.name), std::move(declarator.type), 0});
+    }
+    consume(TokenKind::RightBrace, "expected '}' after struct definition");
+
+    TypePtr structType = Type::makeStruct(structName, std::move(members));
+    structTypes[structName] = structType;
+    return structType;
 }
 
 GlobalVar Parser::parseGlobalVariable(TypePtr declaredType, std::string name, bool isExternStorage) {
@@ -210,7 +240,11 @@ std::unique_ptr<Expr> Parser::parseInitializer() {
     std::vector<std::unique_ptr<Expr>> elements;
     if (!check(TokenKind::RightBrace)) {
         do {
-            elements.push_back(parseExpression());
+            if (check(TokenKind::LeftBrace)) {
+                elements.push_back(parseInitializer());
+            } else {
+                elements.push_back(parseExpression());
+            }
         } while (match(TokenKind::Comma));
     }
     consume(TokenKind::RightBrace, "expected '}' after initializer list");
@@ -218,6 +252,9 @@ std::unique_ptr<Expr> Parser::parseInitializer() {
 }
 
 TypePtr Parser::parseBaseType() {
+    if (match(TokenKind::KeywordStruct)) {
+        return parseStructType();
+    }
     if (match(TokenKind::KeywordChar)) {
         return Type::makeChar();
     }
@@ -517,6 +554,19 @@ std::unique_ptr<Expr> Parser::parsePostfix() {
             continue;
         }
 
+        if (match(TokenKind::Dot)) {
+            const Token &memberToken = consume(TokenKind::Identifier, "expected member name after '.'");
+            expr = std::make_unique<MemberAccessExpr>(std::move(expr), memberToken.lexeme);
+            continue;
+        }
+
+        if (match(TokenKind::Arrow)) {
+            const Token &memberToken = consume(TokenKind::Identifier, "expected member name after '->'");
+            auto dereference = std::make_unique<UnaryExpr>(UnaryOp::Dereference, std::move(expr));
+            expr = std::make_unique<MemberAccessExpr>(std::move(dereference), memberToken.lexeme);
+            continue;
+        }
+
         break;
     }
 
@@ -543,7 +593,8 @@ std::unique_ptr<Expr> Parser::parsePrimary() {
 }
 
 bool Parser::isTypeSpecifier(TokenKind kind) const {
-    return kind == TokenKind::KeywordChar ||
+    return kind == TokenKind::KeywordStruct ||
+        kind == TokenKind::KeywordChar ||
         kind == TokenKind::KeywordShort ||
         kind == TokenKind::KeywordInt ||
         kind == TokenKind::KeywordLong ||

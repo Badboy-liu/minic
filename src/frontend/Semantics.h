@@ -28,17 +28,20 @@ struct GlobalSignature {
 
 class SemanticAnalyzer {
 public:
-    void analyze(Program &program);
+    void analyze(Program &program, bool requireMain = true);
 
 private:
     void analyzeFunction(Function &function);
     void analyzeGlobal(GlobalVar &global);
     void validateArrayInitializer(const std::string &name, const TypePtr &arrayType, Expr &init, bool isGlobal);
+    void validateStructInitializer(const std::string &name, const TypePtr &structType, Expr &init, bool isGlobal);
     bool isSupportedGlobalPointerInitializer(const GlobalVar &global) const;
     bool isSupportedGlobalPointerArrayInitializer(const GlobalVar &global) const;
     bool isSupportedStaticPointerInitializer(const Expr &expr) const;
     bool isSupportedPointerArrayElementInitializer(const TypePtr &elementType, const Expr &expr, bool isGlobal) const;
     bool isSupportedGlobalIntegerInitializer(const Expr &expr) const;
+    bool isSupportedStructMemberType(const TypePtr &type) const;
+    bool isSupportedByValueStructType(const TypePtr &type) const;
     void analyzeBlock(BlockStmt &block);
     void analyzeStatement(Stmt &stmt);
     void analyzeExpr(Expr &expr);

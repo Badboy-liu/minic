@@ -22,12 +22,17 @@
   ],
   "testPresets": [
     {
-      "name": "phase-current",
+      "name": "debug-base",
+      "hidden": true,
       "configurePreset": "default",
       "configuration": "Debug",
       "output": {
         "outputOnFailure": true
-      },
+      }
+    },
+    {
+      "name": "phase-current",
+      "inherits": "debug-base",
       "filter": {
         "include": {
           "label": "phase-current"
@@ -35,12 +40,72 @@
       }
     },
     {
+      "name": "phase-current-parallel",
+      "inherits": "phase-current",
+      "execution": {
+        "jobs": 8
+      }
+    },
+    {
+      "name": "frontend",
+      "inherits": "debug-base",
+      "filter": {
+        "include": {
+          "label": "frontend"
+        }
+      }
+    },
+    {
+      "name": "frontend-parallel",
+      "inherits": "frontend",
+      "execution": {
+        "jobs": 6
+      }
+    },
+    {
+      "name": "backend",
+      "inherits": "debug-base",
+      "filter": {
+        "include": {
+          "label": "backend"
+        }
+      }
+    },
+    {
+      "name": "backend-parallel",
+      "inherits": "backend",
+      "execution": {
+        "jobs": 6
+      }
+    },
+    {
+      "name": "linker",
+      "inherits": "debug-base",
+      "filter": {
+        "include": {
+          "label": "linker"
+        }
+      }
+    },
+    {
+      "name": "linker-parallel",
+      "inherits": "linker",
+      "execution": {
+        "jobs": 6
+      }
+    },
+    {
+      "name": "optimizer",
+      "inherits": "debug-base",
+      "filter": {
+        "include": {
+          "label": "optimizer"
+        }
+      }
+    },
+    {
       "name": "bss",
-      "configurePreset": "default",
-      "configuration": "Debug",
-      "output": {
-        "outputOnFailure": true
-      },
+      "inherits": "debug-base",
       "filter": {
         "include": {
           "name": "minic_bss_integrity"
@@ -49,11 +114,7 @@
     },
     {
       "name": "imports",
-      "configurePreset": "default",
-      "configuration": "Debug",
-      "output": {
-        "outputOnFailure": true
-      },
+      "inherits": "debug-base",
       "filter": {
         "include": {
           "label": "imports"
@@ -61,12 +122,15 @@
       }
     },
     {
+      "name": "imports-parallel",
+      "inherits": "imports",
+      "execution": {
+        "jobs": 6
+      }
+    },
+    {
       "name": "relocations",
-      "configurePreset": "default",
-      "configuration": "Debug",
-      "output": {
-        "outputOnFailure": true
-      },
+      "inherits": "debug-base",
       "filter": {
         "include": {
           "label": "relocations"
@@ -74,12 +138,15 @@
       }
     },
     {
+      "name": "relocations-parallel",
+      "inherits": "relocations",
+      "execution": {
+        "jobs": 4
+      }
+    },
+    {
       "name": "rebasing",
-      "configurePreset": "default",
-      "configuration": "Debug",
-      "output": {
-        "outputOnFailure": true
-      },
+      "inherits": "debug-base",
       "filter": {
         "include": {
           "label": "rebasing"
@@ -88,11 +155,7 @@
     },
     {
       "name": "linker-failures",
-      "configurePreset": "default",
-      "configuration": "Debug",
-      "output": {
-        "outputOnFailure": true
-      },
+      "inherits": "debug-base",
       "filter": {
         "include": {
           "label": "linker-failures"
@@ -100,16 +163,42 @@
       }
     },
     {
+      "name": "linker-failures-parallel",
+      "inherits": "linker-failures",
+      "execution": {
+        "jobs": 6
+      }
+    },
+    {
       "name": "linux-link",
-      "configurePreset": "default",
-      "configuration": "Debug",
-      "output": {
-        "outputOnFailure": true
-      },
+      "inherits": "debug-base",
       "filter": {
         "include": {
           "label": "linux-link"
         }
+      }
+    },
+    {
+      "name": "linux-link-parallel",
+      "inherits": "linux-link",
+      "execution": {
+        "jobs": 3
+      }
+    },
+    {
+      "name": "multifile",
+      "inherits": "debug-base",
+      "filter": {
+        "include": {
+          "label": "multifile"
+        }
+      }
+    },
+    {
+      "name": "multifile-parallel",
+      "inherits": "multifile",
+      "execution": {
+        "jobs": 4
       }
     }
   ]

@@ -8,6 +8,10 @@ enum class LinkerFlavor {
     WslGccElf
 };
 
+enum class AssemblerFlavor {
+    NasmCompatible
+};
+
 enum class AbiFlavor {
     WindowsX64,
     SystemVAMD64
@@ -26,14 +30,17 @@ enum class TargetKind {
 struct TargetSpec {
     TargetKind kind;
     const char *name;
-    const char *nasmObjectFormat;
+    const char *objectFormat;
     const char *objectExtension;
     const char *executableExtension;
     const char *entrySymbol;
     int integerRegisterArgumentCount;
+    AssemblerFlavor assemblerFlavor;
     LinkerFlavor linkerFlavor;
     AbiFlavor abiFlavor;
     RuntimeEntryFlavor runtimeEntryFlavor;
+    bool supportsExecutableLinking;
+    bool supportsAssemblyInputs;
 };
 
 inline const TargetSpec &targetSpec(TargetKind target) {
@@ -45,9 +52,12 @@ inline const TargetSpec &targetSpec(TargetKind target) {
         ".exe",
         "mainCRTStartup",
         4,
+        AssemblerFlavor::NasmCompatible,
         LinkerFlavor::BuiltinPeCoff,
         AbiFlavor::WindowsX64,
-        RuntimeEntryFlavor::ExitProcessStub
+        RuntimeEntryFlavor::ExitProcessStub,
+        true,
+        true
     };
     static const TargetSpec linux{
         TargetKind::LinuxX64,
@@ -57,9 +67,12 @@ inline const TargetSpec &targetSpec(TargetKind target) {
         "",
         "_start",
         6,
+        AssemblerFlavor::NasmCompatible,
         LinkerFlavor::WslGccElf,
         AbiFlavor::SystemVAMD64,
-        RuntimeEntryFlavor::LinuxSyscall
+        RuntimeEntryFlavor::LinuxSyscall,
+        true,
+        true
     };
 
     switch (target) {

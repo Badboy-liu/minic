@@ -1,5 +1,6 @@
 #include "Toolchain.h"
 
+#include "AssemblerBackend.h"
 #include "LinkerBackend.h"
 #include "ProcessUtils.h"
 
@@ -15,22 +16,22 @@ namespace fs = std::filesystem;
 ToolchainPaths Toolchain::detect() {
     ToolchainPaths paths;
 
-    const std::vector<fs::path> nasmCandidates = {
+    const std::vector<fs::path> assemblerCandidates = {
         "D:/software/nasm/nasm.exe",
         "C:/Program Files/NASM/nasm.exe"
     };
 
-    for (const auto &candidate : nasmCandidates) {
+    for (const auto &candidate : assemblerCandidates) {
         if (fs::exists(candidate)) {
-            paths.nasm = candidate;
+            paths.assembler = candidate;
             break;
         }
     }
-    if (paths.nasm.empty()) {
-        paths.nasm = findExecutableOnPath("nasm.exe");
+    if (paths.assembler.empty()) {
+        paths.assembler = findExecutableOnPath("nasm.exe");
     }
-    if (paths.nasm.empty()) {
-        throw std::runtime_error("could not find nasm.exe");
+    if (paths.assembler.empty()) {
+        throw std::runtime_error("could not find a compatible assembler executable");
     }
 
     const fs::path wslCandidate = "C:/Windows/System32/wsl.exe";
@@ -45,10 +46,11 @@ ToolchainPaths Toolchain::detect() {
 
 void Toolchain::invokeExternalLinker(
     const fs::path &linkerExecutable,
-    TargetKind target,
+    const TargetSpec &target,
     const std::vector<fs::path> &objPaths,
     const fs::path &exePath,
-    bool traceLinker) {
+    bool traceLinker,
+    unsigned int jobs) {
     if (objPaths.empty()) {
         throw std::runtime_error("no object inputs were produced for final linking");
     }
@@ -62,9 +64,13 @@ void Toolchain::invokeExternalLinker(
         arguments.push_back(objPath.string());
     }
     arguments.push_back("--target");
-    arguments.push_back(targetSpec(target).name);
+    arguments.push_back(target.name);
     arguments.push_back("-o");
     arguments.push_back(exePath.string());
+    if (jobs > 0) {
+        arguments.push_back("--jobs");
+        arguments.push_back(std::to_string(jobs));
+    }
     if (traceLinker) {
         arguments.push_back("--link-trace");
     }
@@ -78,24 +84,27 @@ void Toolchain::assembleObject(
     const fs::path &asmPath,
     const fs::path &objPath) {
     const TargetSpec &spec = targetSpec(target);
-    if (!objPath.parent_path().empty()) {
-        fs::create_directories(objPath.parent_path());
-    }
-
-    ProcessUtils::runCommand(
-        paths.nasm,
-        {"-f", spec.nasmObjectFormat, "-o", objPath.string(), asmPath.string()},
-        "assembling generated NASM x64 assembly");
+    AssemblerInvocation invocation;
+    invocation.target = &spec;
+    invocation.inputPath = asmPath;
+    invocation.outputPath = objPath;
+    createAssemblerBackend(paths.assemblerFlavor)->assemble(paths, invocation);
 }
 
 void Toolchain::linkObjects(
     const ToolchainPaths &paths,
-    TargetKind target,
+    const TargetSpec &target,
     const std::vector<fs::path> &objPaths,
     const fs::path &exePath,
-    bool traceLinker) {
-    const TargetSpec &spec = targetSpec(target);
-    createLinkerBackend(spec.linkerFlavor)->link(paths, spec, objPaths, exePath, traceLinker);
+    bool traceLinker,
+    unsigned int jobs) {
+    LinkerInvocation invocation;
+    invocation.target = &target;
+    invocation.objPaths = objPaths;
+    invocation.outputPath = exePath;
+    invocation.traceLinker = traceLinker;
+    invocation.jobs = jobs;
+    createLinkerBackend(target.linkerFlavor)->link(paths, invocation);
 }
 
 fs::path Toolchain::findExecutableOnPath(const std::string &name) {

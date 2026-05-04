@@ -1,15 +1,18 @@
 #include "PeLinker.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iterator>
 #include <limits>
 #include <ostream>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -150,6 +153,17 @@ std::uint32_t alignTo(std::uint32_t value, std::uint32_t alignment) {
     return (value + alignment - 1) / alignment * alignment;
 }
 
+unsigned int objectReadWorkerCount(std::size_t taskCount, unsigned int requestedJobs) {
+    if (taskCount <= 1) {
+        return 1;
+    }
+
+    const unsigned int detected = std::thread::hardware_concurrency();
+    const unsigned int fallback = 4;
+    const unsigned int available = requestedJobs == 0 ? (detected == 0 ? fallback : detected) : requestedJobs;
+    return static_cast<unsigned int>(std::min<std::size_t>(taskCount, available));
+}
+
 std::string linkerDiagnostic(const std::string &detail);
 
 bool isRecognizedSection(const std::string &name) {
@@ -172,6 +186,11 @@ const std::vector<ImportSpec> &builtinImportCatalog() {
 }
 
 fs::path importCatalogPath() {
+    if (const char *overridePath = std::getenv("MINIC_IMPORT_CATALOG")) {
+        if (overridePath[0] != '\0') {
+            return fs::path(overridePath);
+        }
+    }
     return fs::current_path() / "config" / "import_catalog.txt";
 }
 
@@ -968,17 +987,35 @@ void writeSectionName(std::vector<std::uint8_t> &file, std::size_t offset, const
     }
 }
 
-std::vector<LinkedObject> readLinkedObjects(const std::vector<fs::path> &objPaths) {
+std::vector<LinkedObject> readLinkedObjects(const std::vector<fs::path> &objPaths, unsigned int jobs) {
     if (objPaths.empty()) {
         throw std::runtime_error(linkerDiagnostic("no object files to link"));
     }
 
     std::vector<LinkedObject> linkedObjects;
+    linkedObjects.reserve(objPaths.size());
+    if (objectReadWorkerCount(objPaths.size(), jobs) == 1) {
+        for (const auto &objPath : objPaths) {
+            LinkedObject linkedObject;
+            linkedObject.object = readObject(objPath);
+            linkedObject.sectionOffsets.resize(linkedObject.object.sections.size(), 0);
+            linkedObjects.push_back(std::move(linkedObject));
+        }
+        return linkedObjects;
+    }
+
+    std::vector<std::future<LinkedObject>> futures;
+    futures.reserve(objPaths.size());
     for (const auto &objPath : objPaths) {
-        LinkedObject linkedObject;
-        linkedObject.object = readObject(objPath);
-        linkedObject.sectionOffsets.resize(linkedObject.object.sections.size(), 0);
-        linkedObjects.push_back(std::move(linkedObject));
+        futures.push_back(std::async(std::launch::async, [objPath]() {
+            LinkedObject linkedObject;
+            linkedObject.object = readObject(objPath);
+            linkedObject.sectionOffsets.resize(linkedObject.object.sections.size(), 0);
+            return linkedObject;
+        }));
+    }
+    for (auto &future : futures) {
+        linkedObjects.push_back(future.get());
     }
     return linkedObjects;
 }
@@ -1283,15 +1320,20 @@ void traceBaseRelocations(std::ostream &out, const BaseRelocationLayout &layout)
 
 } // namespace
 
-void PeLinker::linkSingleObject(const fs::path &objPath, const fs::path &exePath, std::ostream *trace) {
-    linkObjects({objPath}, exePath, trace);
+void PeLinker::linkSingleObject(
+    const fs::path &objPath,
+    const fs::path &exePath,
+    unsigned int jobs,
+    std::ostream *trace) {
+    linkObjects({objPath}, exePath, jobs, trace);
 }
 
 void PeLinker::linkObjects(
     const std::vector<fs::path> &objPaths,
     const fs::path &exePath,
+    unsigned int jobs,
     std::ostream *trace) {
-    std::vector<LinkedObject> linkedObjects = readLinkedObjects(objPaths);
+    std::vector<LinkedObject> linkedObjects = readLinkedObjects(objPaths, jobs);
     if (trace) {
         traceInputObjects(*trace, linkedObjects);
     }
