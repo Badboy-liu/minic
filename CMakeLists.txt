@@ -30,6 +30,12 @@ set(MINIC_CORE_SOURCES
     src/linker/BuiltinPeCoffLinkerBackend.h
     src/linker/WslGccElfLinkerBackend.cpp
     src/linker/WslGccElfLinkerBackend.h
+    src/linker/BuiltinElfLinkerBackend.cpp
+    src/linker/BuiltinElfLinkerBackend.h
+    src/linker/ElfLinker.cpp
+    src/linker/ElfLinker.h
+    src/linker/CoffArchive.cpp
+    src/linker/CoffArchive.h
     src/support/Toolchain.cpp
     src/support/Toolchain.h
     src/linker/PeLinker.cpp
@@ -38,10 +44,14 @@ set(MINIC_CORE_SOURCES
     src/backend/CodeGenerator.h
     src/backend/Optimizer.cpp
     src/backend/Optimizer.h
+    src/frontend/Diagnostics.cpp
+    src/frontend/Diagnostics.h
     src/frontend/Semantics.cpp
     src/frontend/Semantics.h
     src/frontend/Parser.cpp
     src/frontend/Parser.h
+    src/frontend/Preprocessor.cpp
+    src/frontend/Preprocessor.h
     src/frontend/Lexer.cpp
     src/frontend/Lexer.h
     src/frontend/Token.cpp
@@ -73,6 +83,15 @@ if (WIN32)
         tests/minic_regression_tests.cpp
         tests/regression_test_utils.cpp
         tests/regression_test_utils.h
+        tests/lexer_unit_tests.cpp
+        tests/preprocessor_unit_tests.cpp
+        tests/semantics_unit_tests.cpp
+        src/frontend/Lexer.cpp
+        src/frontend/Token.cpp
+        src/frontend/Diagnostics.cpp
+        src/frontend/Preprocessor.cpp
+        src/frontend/Parser.cpp
+        src/frontend/Semantics.cpp
     )
     target_link_libraries(minic_gtests PRIVATE GTest::gtest GTest::gtest_main)
     target_compile_definitions(minic_gtests
@@ -113,7 +132,10 @@ configure_minic_target(${PROJECT_NAME})
 configure_minic_target(minic-link)
 target_compile_definitions(pe_reloc_probe PRIVATE NOMINMAX)
 if (WIN32)
-    target_include_directories(minic_gtests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+    target_include_directories(minic_gtests PRIVATE
+        ${PROJECT_SOURCE_DIR}/tests
+        ${PROJECT_SOURCE_DIR}/src/frontend
+    )
 endif()
 
 if (WIN32)
@@ -348,22 +370,57 @@ if (WIN32)
     )
 
     add_minic_regression_test(
-        minic_struct_init_nested_unsupported
+        minic_struct_init_nested_success
         SOURCES input/tmp_struct_init_nested_unsupported.c
         OUTPUT_EXE build/output/tmp_struct_init_nested_unsupported.exe
         EXPECTED_EXIT 0
-        ERROR_MARKERS "struct initializers do not yet support array or struct members"
-        LABELS regression phase-current semantics
+        LABELS regression phase-current semantics initializers
     )
 
     add_minic_regression_test(
-        minic_struct_linux_by_value_unsupported
+        minic_struct_linux_by_value_pair
         SOURCES input/tmp_struct_linux_by_value_unsupported.c
         COMPILER_ARGS --target x86_64-linux
         OUTPUT_EXE build/output/tmp_struct_linux_by_value_unsupported
-        EXPECTED_EXIT 0
-        ERROR_MARKERS "by-value struct parameters are not supported yet on x86_64-linux"
-        LABELS regression phase-current semantics
+        EXPECTED_EXIT 42
+        RUN_WITH_WSL SKIP_IF_WSL_UNAVAILABLE
+        LABELS regression phase-current semantics abi
+    )
+
+    add_minic_regression_test(
+        minic_struct_nested_init
+        SOURCES input/tmp_struct_nested_init.c
+        OUTPUT_EXE build/output/tmp_struct_nested_init.exe
+        EXPECTED_EXIT 42
+        LABELS regression phase-current semantics initializers
+    )
+
+    add_minic_regression_test(
+        minic_struct_nested_init_local
+        SOURCES input/tmp_struct_nested_init_local.c
+        OUTPUT_EXE build/output/tmp_struct_nested_init_local.exe
+        EXPECTED_EXIT 42
+        LABELS regression phase-current semantics initializers
+    )
+
+    add_minic_regression_test(
+        minic_struct_linux_by_value_medium
+        SOURCES input/tmp_struct_linux_by_value_medium.c
+        COMPILER_ARGS --target x86_64-linux
+        OUTPUT_EXE build/output/tmp_struct_linux_by_value_medium
+        EXPECTED_EXIT 42
+        RUN_WITH_WSL SKIP_IF_WSL_UNAVAILABLE
+        LABELS regression phase-current semantics abi
+    )
+
+    add_minic_regression_test(
+        minic_struct_linux_by_value_large
+        SOURCES input/tmp_struct_linux_by_value_large.c
+        COMPILER_ARGS --target x86_64-linux
+        OUTPUT_EXE build/output/tmp_struct_linux_by_value_large
+        EXPECTED_EXIT 42
+        RUN_WITH_WSL SKIP_IF_WSL_UNAVAILABLE
+        LABELS regression phase-current semantics abi
     )
 
     add_minic_regression_test(
@@ -839,6 +896,22 @@ if (WIN32)
         LABELS regression phase-current linker-failures
     )
 
+    add_minic_regression_test(
+        minic_variadic
+        SOURCES input/tmp_variadic.c
+        OUTPUT_EXE build/output/tmp_variadic.exe
+        EXPECTED_EXIT 42
+        LABELS regression phase-current semantics abi
+    )
+
+    add_minic_regression_test(
+        minic_preprocessor_ops
+        SOURCES input/tmp_preprocessor_ops.c
+        OUTPUT_EXE build/output/tmp_preprocessor_ops.exe
+        EXPECTED_EXIT 42
+        LABELS regression phase-current preprocessor
+    )
+
     function(append_minic_test_labels test_name)
         get_property(existing_labels TEST ${test_name} PROPERTY LABELS)
         if (existing_labels)
@@ -868,14 +941,16 @@ if (WIN32)
         minic_struct_by_value_large_return
         minic_struct_init_too_many
         minic_struct_init_bad_type
-        minic_struct_init_nested_unsupported
-        minic_struct_linux_by_value_unsupported
+        minic_struct_init_nested_success
+        minic_struct_linux_by_value_pair
         minic_local_int_array_init
         minic_global_int_array_init
         minic_local_ptr_array_init
         minic_array_too_many_elements
         minic_array_bad_element_type
         minic_local_ptr_array_invalid_source
+        minic_variadic
+        minic_preprocessor_ops
     )
     foreach(test_name IN LISTS MINIC_FRONTEND_TESTS)
         append_minic_test_labels(${test_name} frontend)

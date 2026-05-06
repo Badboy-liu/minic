@@ -5,7 +5,8 @@
 
 enum class LinkerFlavor {
     BuiltinPeCoff,
-    WslGccElf
+    WslGccElf,
+    BuiltinElf
 };
 
 enum class AssemblerFlavor {
@@ -68,7 +69,7 @@ inline const TargetSpec &targetSpec(TargetKind target) {
         "_start",
         6,
         AssemblerFlavor::NasmCompatible,
-        LinkerFlavor::WslGccElf,
+        LinkerFlavor::BuiltinElf,
         AbiFlavor::SystemVAMD64,
         RuntimeEntryFlavor::LinuxSyscall,
         true,

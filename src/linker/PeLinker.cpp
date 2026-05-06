@@ -1,5 +1,7 @@
 #include "PeLinker.h"
 
+#include "CoffArchive.h"
+
 #include <algorithm>
 #include <cstdlib>
 #include <cstdint>
@@ -23,10 +25,33 @@ namespace {
 constexpr std::uint16_t MachineAmd64 = 0x8664;
 constexpr std::uint16_t RelAmd64Addr64 = 0x0001;
 constexpr std::uint16_t RelAmd64Rel32 = 0x0004;
+constexpr std::uint16_t RelAmd64Section = 0x000A;
+constexpr std::uint16_t RelAmd64Secrel = 0x000B;
 constexpr std::uint16_t ImageRelBasedDir64 = 10;
 constexpr std::int16_t UndefinedSection = 0;
 constexpr std::uint8_t StorageClassExternal = 2;
 constexpr std::uint32_t SectionContainsUninitializedData = 0x00000080;
+constexpr std::uint32_t ImageScnCntInitializedData = 0x00000040;
+constexpr std::uint32_t ImageScnMemRead = 0x40000000;
+constexpr std::uint32_t ImageScnMemWrite = 0x80000000;
+
+// PE 数据目录索引
+constexpr int DataDirExportTable = 0;
+constexpr int DataDirImportTable = 1;
+constexpr int DataDirResourceTable = 2;
+constexpr int DataDirExceptionTable = 3;
+constexpr int DataDirCertificateTable = 4;
+constexpr int DataDirBaseRelocationTable = 5;
+constexpr int DataDirDebug = 6;
+constexpr int DataDirArchitecture = 7;
+constexpr int DataDirGlobalPtr = 8;
+constexpr int DataDirTlsTable = 9;
+constexpr int DataDirLoadConfigTable = 10;
+constexpr int DataDirBoundImport = 11;
+constexpr int DataDirIat = 12;
+constexpr int DataDirDelayImportDescriptor = 13;
+constexpr int DataDirClrRuntimeHeader = 14;
+constexpr int DataDirReserved = 15;
 
 constexpr std::uint32_t FileAlignment = 0x200;
 constexpr std::uint32_t SectionAlignment = 0x1000;
@@ -111,6 +136,52 @@ struct BaseRelocationLayout {
     std::size_t siteCount = 0;
 };
 
+// TLS（线程本地存储）布局
+struct TlsLayout {
+    std::uint32_t directoryRva = 0;        // IMAGE_TLS_DIRECTORY 的 RVA
+    std::uint32_t directorySize = 0;       // IMAGE_TLS_DIRECTORY 的大小
+    std::uint32_t rawDataRva = 0;          // TLS 原始数据的 RVA
+    std::uint32_t rawDataSize = 0;         // TLS 原始数据的大小
+    std::uint32_t indexRva = 0;            // TLS 索引变量的 RVA
+    std::uint32_t callbacksRva = 0;        // TLS 回调数组的 RVA
+    std::uint32_t zeroFillSize = 0;        // 零填充大小
+    std::vector<std::uint8_t> rawData;     // TLS 原始数据内容
+    std::vector<std::uint64_t> callbacks;  // TLS 回调函数 RVA 列表
+    std::vector<std::uint8_t> bytes;       // 完整的 TLS 目录二进制数据
+};
+
+// 延迟加载导入描述符
+struct DelayLoadDescriptor {
+    std::uint32_t attributes = 0;                    // 属性（1 = RvaBased）
+    std::uint32_t dllNameRva = 0;                    // DLL 名称的 RVA
+    std::uint32_t moduleHandleRva = 0;               // 模块句柄的 RVA
+    std::uint32_t importAddressTableRva = 0;         // 延迟导入地址表 RVA
+    std::uint32_t importNameTableRva = 0;            // 延迟导入名称表 RVA
+    std::uint32_t boundImportAddressTableRva = 0;    // 绑定导入地址表 RVA
+    std::uint32_t unloadInformationTableRva = 0;     // 卸载信息表 RVA
+    std::uint32_t timeDateStamp = 0;                 // 时间戳
+};
+
+struct DelayImportLayout {
+    std::uint32_t rva = 0;                           // 延迟导入表的 RVA
+    std::uint32_t size = 0;                          // 延迟导入表的大小
+    std::vector<DelayLoadDescriptor> descriptors;    // 描述符列表
+    struct Symbol {
+        std::string symbolName;
+        std::string importName;
+        std::string dllName;
+        std::string sourceName;
+        std::uint32_t thunkRva = 0;                  // thunk 代码的 RVA
+        std::uint32_t iatRva = 0;                    // IAT 条目的 RVA
+    };
+    struct Group {
+        std::string dllName;
+        std::vector<Symbol> symbols;
+    };
+    std::vector<Group> groups;
+    std::vector<std::uint8_t> bytes;                 // 完整的延迟导入二进制数据
+};
+
 struct ResolvedSymbolTraceEntry {
     fs::path objectPath;
     std::string sectionName;
@@ -167,7 +238,7 @@ unsigned int objectReadWorkerCount(std::size_t taskCount, unsigned int requested
 std::string linkerDiagnostic(const std::string &detail);
 
 bool isRecognizedSection(const std::string &name) {
-    return name == ".text" || name == ".data" || name == ".rdata" || name == ".bss";
+    return name == ".text" || name == ".data" || name == ".rdata" || name == ".bss" || name == ".tls";
 }
 
 bool isTraceableSymbol(const Symbol &symbol) {
@@ -181,6 +252,7 @@ const std::vector<ImportSpec> &builtinImportCatalog() {
         {"fn_puts", "puts", "msvcrt.dll", "builtin"},
         {"fn_putchar", "putchar", "msvcrt.dll", "builtin"},
         {"fn_printf", "printf", "msvcrt.dll", "builtin"},
+        {"fmod", "fmod", "msvcrt.dll", "builtin"},
     };
     return imports;
 }
@@ -289,6 +361,139 @@ const ImportSpec *resolveImportSymbol(const std::string &symbolName, const std::
 
 bool isImportedSymbolName(const std::string &symbolName) {
     return resolveImportSymbol(symbolName, loadImportCatalog()) != nullptr;
+}
+
+// 延迟加载导入目录路径
+fs::path delayImportCatalogPath() {
+    if (const char *overridePath = std::getenv("MINIC_DELAY_IMPORT_CATALOG")) {
+        if (overridePath[0] != '\0') {
+            return fs::path(overridePath);
+        }
+    }
+    return fs::current_path() / "config" / "delay_import_catalog.txt";
+}
+
+// 加载延迟加载导入目录
+std::vector<ImportSpec> loadDelayImportCatalog() {
+    const fs::path catalogPath = delayImportCatalogPath();
+    if (!fs::exists(catalogPath)) {
+        return {};
+    }
+
+    std::ifstream input(catalogPath);
+    if (!input) {
+        throw std::runtime_error(linkerDiagnostic("failed to open delay import catalog: " + catalogPath.string()));
+    }
+
+    std::vector<ImportSpec> imports;
+    std::unordered_map<std::string, std::size_t> seenLines;
+    std::string line;
+    std::size_t lineNumber = 0;
+    while (std::getline(input, line)) {
+        ++lineNumber;
+        const std::string trimmed = trimCopy(line);
+        if (trimmed.empty() || trimmed[0] == '#') {
+            continue;
+        }
+
+        std::vector<std::string> fields;
+        std::size_t start = 0;
+        while (true) {
+            const std::size_t separator = trimmed.find('|', start);
+            if (separator == std::string::npos) {
+                fields.push_back(trimCopy(trimmed.substr(start)));
+                break;
+            }
+            fields.push_back(trimCopy(trimmed.substr(start, separator - start)));
+            start = separator + 1;
+        }
+
+        if (fields.size() != 3 || fields[0].empty() || fields[1].empty() || fields[2].empty()) {
+            throw std::runtime_error(
+                linkerDiagnostic(
+                    "invalid delay import catalog row " + catalogPath.string() + ":" + std::to_string(lineNumber) +
+                    "; expected symbol|dll|import"));
+        }
+
+        const auto [it, inserted] = seenLines.emplace(fields[0], lineNumber);
+        if (!inserted) {
+            throw std::runtime_error(
+                linkerDiagnostic(
+                    "duplicate delay import catalog symbol " + fields[0] + " in " + catalogPath.string() +
+                    " at lines " + std::to_string(it->second) + " and " + std::to_string(lineNumber)));
+        }
+
+        imports.push_back(ImportSpec{fields[0], fields[2], fields[1], "delay_file"});
+    }
+
+    return imports;
+}
+
+// 收集延迟加载导入
+std::vector<ResolvedImportEntry> collectDelayImports(
+    const std::vector<LinkedObject> &linkedObjects,
+    const std::unordered_map<std::string, bool> &definedSymbolNames,
+    const std::vector<ImportSpec> &delayCatalog) {
+    std::unordered_map<std::string, bool> unresolvedExternals;
+    for (const auto &linkedObject : linkedObjects) {
+        for (const auto &symbol : linkedObject.object.symbols) {
+            if (!isTraceableSymbol(symbol) || symbol.sectionNumber != UndefinedSection) {
+                continue;
+            }
+            if (definedSymbolNames.find(symbol.name) != definedSymbolNames.end()) {
+                continue;
+            }
+            unresolvedExternals.emplace(symbol.name, true);
+        }
+    }
+
+    std::vector<ResolvedImportEntry> imports;
+    for (const auto &[symbolName, _] : unresolvedExternals) {
+        const ImportSpec *resolved = resolveImportSymbol(symbolName, delayCatalog);
+        if (resolved == nullptr) {
+            continue;
+        }
+        imports.push_back(
+            ResolvedImportEntry{
+                resolved->symbolName,
+                resolved->importName,
+                resolved->dllName,
+                resolved->sourceName});
+    }
+    std::sort(
+        imports.begin(),
+        imports.end(),
+        [](const ResolvedImportEntry &left, const ResolvedImportEntry &right) {
+            if (left.dllName != right.dllName) {
+                return left.dllName < right.dllName;
+            }
+            return left.symbolName < right.symbolName;
+        });
+    return imports;
+}
+
+// 分组延迟加载导入
+std::vector<DelayImportLayout::Group> groupDelayImports(const std::vector<ResolvedImportEntry> &resolvedImports) {
+    std::vector<DelayImportLayout::Group> groups;
+    for (const auto &entry : resolvedImports) {
+        auto group = std::find_if(
+            groups.begin(),
+            groups.end(),
+            [&](const DelayImportLayout::Group &candidate) { return candidate.dllName == entry.dllName; });
+        if (group == groups.end()) {
+            groups.push_back(DelayImportLayout::Group{entry.dllName, {}});
+            group = std::prev(groups.end());
+        }
+        group->symbols.push_back(
+            DelayImportLayout::Symbol{
+                entry.symbolName,
+                entry.importName,
+                entry.dllName,
+                entry.sourceName,
+                0,
+                0});
+    }
+    return groups;
 }
 
 std::string hex32(std::uint32_t value) {
@@ -470,15 +675,10 @@ std::string readSymbolName(
     return readFixedName(bytes, symbolOffset, 8);
 }
 
-ObjectFile readObject(const fs::path &path) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        throw std::runtime_error(objectDiagnostic(path, "failed to open object file"));
-    }
-
+ObjectFile readObjectFromBytes(std::vector<std::uint8_t> bytes, const fs::path &path) {
     ObjectFile object;
     object.path = path;
-    object.bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    object.bytes = std::move(bytes);
     if (object.bytes.size() < 20) {
         throw std::runtime_error(objectDiagnostic(path, "object file is too small"));
     }
@@ -534,6 +734,16 @@ ObjectFile readObject(const fs::path &path) {
     }
 
     return object;
+}
+
+ObjectFile readObject(const fs::path &path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        throw std::runtime_error(objectDiagnostic(path, "failed to open object file"));
+    }
+
+    std::vector<std::uint8_t> bytes{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+    return readObjectFromBytes(std::move(bytes), path);
 }
 
 std::size_t findTextSectionIndex(const ObjectFile &object) {
@@ -987,31 +1197,273 @@ void writeSectionName(std::vector<std::uint8_t> &file, std::size_t offset, const
     }
 }
 
+// 构建 TLS 布局
+// TLS 目录结构（x64）：
+//   StartAddressOfRawData  : 8 字节（VA）
+//   EndAddressOfRawData    : 8 字节（VA）
+//   AddressOfIndex         : 8 字节（VA）
+//   AddressOfCallBacks     : 8 字节（VA）
+//   SizeOfZeroFill         : 4 字节
+//   Characteristics        : 4 字节
+TlsLayout buildTlsLayout(
+    std::uint32_t tlsRva,
+    const SectionLayout *tlsSection,
+    std::uint64_t imageBase) {
+    TlsLayout layout;
+
+    if (!tlsSection || tlsSection->bytes.empty()) {
+        return layout;
+    }
+
+    // TLS 目录位于 .rdata 中（在 .tls 数据之前）
+    // 目录大小 = 4 * 8 + 2 * 4 = 40 字节
+    constexpr std::uint32_t TlsDirectorySize = 40;
+    layout.directoryRva = tlsRva;
+    layout.directorySize = TlsDirectorySize;
+
+    // TLS 原始数据紧跟在目录之后
+    layout.rawDataRva = tlsRva + TlsDirectorySize;
+    layout.rawDataSize = static_cast<std::uint32_t>(tlsSection->bytes.size());
+    layout.rawData = tlsSection->bytes;
+
+    // TLS 索引变量（4 字节）紧跟在原始数据之后
+    layout.indexRva = layout.rawDataRva + layout.rawDataSize;
+
+    // TLS 回调数组（null 终止）紧跟在索引之后
+    layout.callbacksRva = layout.indexRva + 4;
+    layout.callbacks = {0}; // null 终止的回调数组
+
+    // 构建二进制数据
+    layout.bytes.clear();
+    // StartAddressOfRawData (VA)
+    append64(layout.bytes, imageBase + layout.rawDataRva);
+    // EndAddressOfRawData (VA)
+    append64(layout.bytes, imageBase + layout.rawDataRva + layout.rawDataSize);
+    // AddressOfIndex (VA)
+    append64(layout.bytes, imageBase + layout.indexRva);
+    // AddressOfCallBacks (VA)
+    append64(layout.bytes, imageBase + layout.callbacksRva);
+    // SizeOfZeroFill
+    append32(layout.bytes, layout.zeroFillSize);
+    // Characteristics
+    append32(layout.bytes, 0);
+
+    return layout;
+}
+
+// 构建延迟加载导入布局
+// 每个 IMAGE_DELAYLOAD_DESCRIPTOR 结构（x64）：
+//   Attributes                   : 4 字节
+//   DllNameRVA                   : 4 字节
+//   ModuleHandleRVA              : 4 字节
+//   ImportAddressTableRVA        : 4 字节
+//   ImportNameTableRVA           : 4 字节
+//   BoundImportAddressTableRVA   : 4 字节
+//   UnloadInformationTableRVA    : 4 字节
+//   TimeDateStamp                : 4 字节
+// 共 32 字节
+DelayImportLayout buildDelayImportLayout(
+    std::uint32_t delayImportRva,
+    std::vector<DelayImportLayout::Group> groups) {
+    DelayImportLayout layout;
+    layout.rva = delayImportRva;
+    layout.groups = std::move(groups);
+
+    // 如果没有延迟加载导入，直接返回空布局
+    if (layout.groups.empty()) {
+        return layout;
+    }
+
+    constexpr std::uint32_t DescriptorSize = 32;
+
+    // 计算所有需要的空间
+    // 1. 描述符表（含 null 终止符）
+    const std::uint32_t descriptorCount = static_cast<std::uint32_t>(layout.groups.size());
+    const std::uint32_t descriptorTableSize = (descriptorCount + 1) * DescriptorSize;
+
+    // 计算各部分的偏移
+    std::uint32_t currentOffset = descriptorTableSize;
+
+    // 2. DLL 名称字符串
+    std::vector<std::uint32_t> dllNameOffsets;
+    for (const auto &group : layout.groups) {
+        dllNameOffsets.push_back(currentOffset);
+        currentOffset += static_cast<std::uint32_t>(group.dllName.size() + 1);
+    }
+
+    // 3. 模块句柄（每个 8 字节）
+    std::vector<std::uint32_t> moduleHandleOffsets;
+    for (std::size_t i = 0; i < layout.groups.size(); ++i) {
+        moduleHandleOffsets.push_back(currentOffset);
+        currentOffset += 8;
+    }
+
+    // 4. IAT 和 INT（每个符号 8 字节 + null 终止）
+    std::vector<std::uint32_t> iatOffsets;
+    std::vector<std::uint32_t> intOffsets;
+    for (auto &group : layout.groups) {
+        iatOffsets.push_back(currentOffset);
+        for (auto &symbol : group.symbols) {
+            symbol.iatRva = delayImportRva + currentOffset;
+            currentOffset += 8;
+        }
+        currentOffset += 8; // null 终止
+
+        intOffsets.push_back(currentOffset);
+        for (auto &symbol : group.symbols) {
+            currentOffset += 8;
+        }
+        currentOffset += 8; // null 终止
+    }
+
+    // 5. Hint/Name 表
+    std::vector<std::vector<std::uint32_t>> hintNameOffsets;
+    for (auto &group : layout.groups) {
+        std::vector<std::uint32_t> offsets;
+        for (auto &symbol : group.symbols) {
+            offsets.push_back(currentOffset);
+            // hint (2) + name + null + padding
+            currentOffset += 2 + static_cast<std::uint32_t>(symbol.importName.size()) + 1;
+            if (currentOffset % 2 != 0) {
+                ++currentOffset;
+            }
+        }
+        hintNameOffsets.push_back(std::move(offsets));
+    }
+
+    layout.size = currentOffset;
+    layout.bytes.resize(currentOffset, 0);
+
+    // 写入描述符表
+    for (std::size_t i = 0; i < layout.groups.size(); ++i) {
+        const std::uint32_t descOffset = static_cast<std::uint32_t>(i) * DescriptorSize;
+        DelayLoadDescriptor desc;
+        desc.attributes = 1; // RvaBased
+        desc.dllNameRva = delayImportRva + dllNameOffsets[i];
+        desc.moduleHandleRva = delayImportRva + moduleHandleOffsets[i];
+        desc.importAddressTableRva = delayImportRva + iatOffsets[i];
+        desc.importNameTableRva = delayImportRva + intOffsets[i];
+        desc.boundImportAddressTableRva = 0;
+        desc.unloadInformationTableRva = 0;
+        desc.timeDateStamp = 0; // -1 表示未绑定
+
+        write32(layout.bytes, descOffset, desc.attributes);
+        write32(layout.bytes, descOffset + 4, desc.dllNameRva);
+        write32(layout.bytes, descOffset + 8, desc.moduleHandleRva);
+        write32(layout.bytes, descOffset + 12, desc.importAddressTableRva);
+        write32(layout.bytes, descOffset + 16, desc.importNameTableRva);
+        write32(layout.bytes, descOffset + 20, desc.boundImportAddressTableRva);
+        write32(layout.bytes, descOffset + 24, desc.unloadInformationTableRva);
+        write32(layout.bytes, descOffset + 28, desc.timeDateStamp);
+
+        layout.descriptors.push_back(desc);
+    }
+
+    // 写入 DLL 名称
+    for (std::size_t i = 0; i < layout.groups.size(); ++i) {
+        std::memcpy(&layout.bytes[dllNameOffsets[i]],
+                     layout.groups[i].dllName.c_str(),
+                     layout.groups[i].dllName.size() + 1);
+    }
+
+    // 写入 IAT 和 INT（初始时 INT 指向 Hint/Name，IAT 也指向 Hint/Name）
+    for (std::size_t gi = 0; gi < layout.groups.size(); ++gi) {
+        const auto &group = layout.groups[gi];
+        for (std::size_t si = 0; si < group.symbols.size(); ++si) {
+            const std::uint32_t hintNameRva = delayImportRva + hintNameOffsets[gi][si];
+            write64(layout.bytes, iatOffsets[gi] + si * 8, hintNameRva);
+            write64(layout.bytes, intOffsets[gi] + si * 8, hintNameRva);
+        }
+        // null 终止
+        write64(layout.bytes, iatOffsets[gi] + group.symbols.size() * 8, 0);
+        write64(layout.bytes, intOffsets[gi] + group.symbols.size() * 8, 0);
+    }
+
+    // 写入 Hint/Name 表
+    for (std::size_t gi = 0; gi < layout.groups.size(); ++gi) {
+        for (std::size_t si = 0; si < layout.groups[gi].symbols.size(); ++si) {
+            const auto &symbol = layout.groups[gi].symbols[si];
+            const std::uint32_t offset = hintNameOffsets[gi][si];
+            write16(layout.bytes, offset, 0); // hint
+            std::memcpy(&layout.bytes[offset + 2],
+                        symbol.importName.c_str(),
+                        symbol.importName.size() + 1);
+        }
+    }
+
+    return layout;
+}
+
+// 为延迟加载导入生成 thunk 代码
+// thunk 代码格式（x64）：
+//   push <iat_index>        ; 68 xx xx xx xx
+//   jmp [__imp_LoadModule]  ; FF 25 xx xx xx xx
+void appendDelayLoadThunkPlaceholder(std::vector<std::uint8_t> &text) {
+    // push <index> - 占位符，稍后填充
+    text.push_back(0x68);
+    append32(text, 0);
+    // jmp [rip + disp32] - 占位符，稍后填充
+    text.push_back(0xFF);
+    text.push_back(0x25);
+    append32(text, 0);
+}
+
+bool isLibraryFile(const fs::path &path) {
+    const std::string ext = path.extension().string();
+    return ext == ".lib" || ext == ".a";
+}
+
 std::vector<LinkedObject> readLinkedObjects(const std::vector<fs::path> &objPaths, unsigned int jobs) {
     if (objPaths.empty()) {
         throw std::runtime_error(linkerDiagnostic("no object files to link"));
     }
 
+    // 展开 .lib/.a 文件为内联 .obj 对象
+    struct ObjEntry {
+        fs::path path;
+        std::vector<std::uint8_t> bytes;  // 非空表示从库中提取的成员
+    };
+    std::vector<ObjEntry> entries;
+    for (const auto &path : objPaths) {
+        if (isLibraryFile(path)) {
+            auto members = CoffArchive::read(path);
+            for (const auto &member : members) {
+                ObjEntry entry;
+                entry.path = path;
+                entry.bytes = member.data;
+                entries.push_back(std::move(entry));
+            }
+        } else {
+            entries.push_back({path, {}});
+        }
+    }
+
+    auto readEntry = [](const ObjEntry &entry) -> LinkedObject {
+        LinkedObject linkedObject;
+        if (entry.bytes.empty()) {
+            linkedObject.object = readObject(entry.path);
+        } else {
+            linkedObject.object = readObjectFromBytes(
+                std::vector<std::uint8_t>(entry.bytes), entry.path);
+        }
+        linkedObject.sectionOffsets.resize(linkedObject.object.sections.size(), 0);
+        return linkedObject;
+    };
+
     std::vector<LinkedObject> linkedObjects;
-    linkedObjects.reserve(objPaths.size());
-    if (objectReadWorkerCount(objPaths.size(), jobs) == 1) {
-        for (const auto &objPath : objPaths) {
-            LinkedObject linkedObject;
-            linkedObject.object = readObject(objPath);
-            linkedObject.sectionOffsets.resize(linkedObject.object.sections.size(), 0);
-            linkedObjects.push_back(std::move(linkedObject));
+    linkedObjects.reserve(entries.size());
+    if (objectReadWorkerCount(entries.size(), jobs) == 1) {
+        for (const auto &entry : entries) {
+            linkedObjects.push_back(readEntry(entry));
         }
         return linkedObjects;
     }
 
     std::vector<std::future<LinkedObject>> futures;
-    futures.reserve(objPaths.size());
-    for (const auto &objPath : objPaths) {
-        futures.push_back(std::async(std::launch::async, [objPath]() {
-            LinkedObject linkedObject;
-            linkedObject.object = readObject(objPath);
-            linkedObject.sectionOffsets.resize(linkedObject.object.sections.size(), 0);
-            return linkedObject;
+    futures.reserve(entries.size());
+    for (const auto &entry : entries) {
+        futures.push_back(std::async(std::launch::async, [&readEntry, entry]() {
+            return readEntry(entry);
         }));
     }
     for (auto &future : futures) {
@@ -1025,7 +1477,9 @@ std::vector<SectionLayout> mergeSections(std::vector<LinkedObject> &linkedObject
         {".text", {}, 0, 0, 0, 0, 0x60000020, false},
         {".data", {}, 0, 0, 0, 0, 0xc0000040, false},
         {".rdata", {}, 0, 0, 0, 0, 0x40000040, false},
-        {".bss", {}, 0, 0, 0, 0, 0xc0000080, true}
+        {".bss", {}, 0, 0, 0, 0, 0xc0000080, true},
+        {".tls", {}, 0, 0, 0, 0,
+            ImageScnCntInitializedData | ImageScnMemRead | ImageScnMemWrite, false}
     };
 
     for (auto &linkedObject : linkedObjects) {
@@ -1370,6 +1824,47 @@ void PeLinker::linkObjects(
         sectionRvas.emplace(section.name, section.rva);
     }
 
+    // 检查是否存在 .tls 节
+    auto tlsSectionIt = std::find_if(
+        sections.begin(),
+        sections.end(),
+        [](const SectionLayout &layout) { return layout.name == ".tls"; });
+    const bool hasTls = (tlsSectionIt != sections.end() && !tlsSectionIt->bytes.empty());
+
+    // 如果存在 .tls 节，构建 TLS 布局并追加到 .rdata
+    TlsLayout tlsLayout;
+    if (hasTls) {
+        auto rdataIt = std::find_if(
+            sections.begin(),
+            sections.end(),
+            [](const SectionLayout &layout) { return layout.name == ".rdata"; });
+        if (rdataIt == sections.end()) {
+            throw std::runtime_error(linkerDiagnostic("TLS section requires .rdata section"));
+        }
+
+        const std::uint32_t tlsDirStartRva = rdataIt->rva + static_cast<std::uint32_t>(rdataIt->bytes.size());
+        tlsLayout = buildTlsLayout(tlsDirStartRva, &*tlsSectionIt, ImageBase);
+
+        // 追加 TLS 目录到 .rdata
+        rdataIt->bytes.insert(rdataIt->bytes.end(), tlsLayout.bytes.begin(), tlsLayout.bytes.end());
+        // 追加 TLS 原始数据
+        rdataIt->bytes.insert(rdataIt->bytes.end(), tlsLayout.rawData.begin(), tlsLayout.rawData.end());
+        // 追加 TLS 索引（4 字节）
+        rdataIt->bytes.resize(rdataIt->bytes.size() + 4, 0);
+        // 追加 TLS 回调数组
+        for (const auto &cb : tlsLayout.callbacks) {
+            append64(rdataIt->bytes, cb);
+        }
+
+        rdataIt->virtualSize = static_cast<std::uint32_t>(rdataIt->bytes.size());
+        if (trace) {
+            *trace << "[link] TLS directory at rva=" << hex32(tlsLayout.directoryRva)
+                   << " size=" << tlsLayout.directorySize
+                   << " raw_data_rva=" << hex32(tlsLayout.rawDataRva)
+                   << " raw_data_size=" << tlsLayout.rawDataSize << '\n';
+        }
+    }
+
     std::vector<ResolvedSymbolTraceEntry> resolvedSymbolTraceEntries;
     const std::unordered_map<std::string, std::uint32_t> definedSymbols =
         collectExternalSymbols(
@@ -1391,6 +1886,57 @@ void PeLinker::linkObjects(
             }
             const std::uint32_t thunkOffset = symbol.thunkRva - sectionRvas.at(".text");
             patchImportThunkDisplacement(textLayout->bytes, thunkOffset, symbol.thunkRva, symbol.iatRva);
+        }
+    }
+
+    // 处理延迟加载导入
+    const std::vector<ImportSpec> delayImportCatalog = loadDelayImportCatalog();
+    const std::vector<ResolvedImportEntry> resolvedDelayImports =
+        collectDelayImports(linkedObjects, definedSymbolNames, delayImportCatalog);
+    std::vector<DelayImportLayout::Group> requestedDelayImports =
+        groupDelayImports(resolvedDelayImports);
+
+    // 为延迟加载导入生成 thunk 代码
+    for (auto &group : requestedDelayImports) {
+        for (auto &symbol : group.symbols) {
+            const std::uint32_t thunkOffset = static_cast<std::uint32_t>(textLayout->bytes.size());
+            appendDelayLoadThunkPlaceholder(textLayout->bytes);
+            symbol.thunkRva = FirstSectionRva + thunkOffset;
+        }
+    }
+    textLayout->virtualSize = static_cast<std::uint32_t>(textLayout->bytes.size());
+
+    // 构建延迟加载导入布局
+    const std::uint32_t delayImportRva = alignTo(
+        idataRva + static_cast<std::uint32_t>(imports.bytes.size()),
+        SectionAlignment);
+    DelayImportLayout delayImports = buildDelayImportLayout(delayImportRva, std::move(requestedDelayImports));
+
+    // 将延迟加载导入符号添加到外部符号表
+    for (const auto &group : delayImports.groups) {
+        for (const auto &symbol : group.symbols) {
+            const auto [it, inserted] = externalSymbols.emplace(symbol.symbolName, symbol.thunkRva);
+            if (!inserted) {
+                throw std::runtime_error(
+                    linkerDiagnostic(
+                        "duplicate external symbol: " + symbol.symbolName +
+                        " (delay import thunk collision for " + symbol.dllName + ")"));
+            }
+        }
+    }
+
+    if (trace && !delayImports.groups.empty()) {
+        *trace << "[link] delay imports\n";
+        *trace << "[link]   summary groups=" << delayImports.groups.size() << '\n';
+        for (const auto &group : delayImports.groups) {
+            *trace << "[link]   dll " << group.dllName << ": ";
+            for (std::size_t i = 0; i < group.symbols.size(); ++i) {
+                if (i > 0) {
+                    *trace << ", ";
+                }
+                *trace << group.symbols[i].symbolName;
+            }
+            *trace << '\n';
         }
     }
 
@@ -1420,10 +1966,12 @@ void PeLinker::linkObjects(
     }
 
     const BaseRelocationLayout baseRelocations = buildBaseRelocationLayout(
-        alignTo(idataRva + static_cast<std::uint32_t>(imports.bytes.size()), SectionAlignment),
+        alignTo(delayImportRva + static_cast<std::uint32_t>(delayImports.bytes.size()), SectionAlignment),
         baseRelocationSites);
     const bool hasBaseRelocations = !baseRelocations.bytes.empty();
-    const std::uint32_t sectionCount = static_cast<std::uint32_t>(sections.size() + 1 + (hasBaseRelocations ? 1 : 0));
+    const bool hasDelayImports = !delayImports.groups.empty();
+    const std::uint32_t sectionCount = static_cast<std::uint32_t>(
+        sections.size() + 1 + (hasBaseRelocations ? 1 : 0));
     const std::uint32_t headersSize = alignTo(0x80 + 4 + 20 + 0xf0 + sectionCount * 40, FileAlignment);
     std::uint32_t nextRawPointer = headersSize;
     for (auto &section : sections) {
@@ -1440,13 +1988,30 @@ void PeLinker::linkObjects(
     const std::uint32_t idataRawSize = alignTo(idataVirtualSize, FileAlignment);
     const std::uint32_t idataRawPointer = nextRawPointer;
     nextRawPointer += idataRawSize;
+
+    // 延迟导入节
+    const std::uint32_t delayImportVirtualSize = static_cast<std::uint32_t>(delayImports.bytes.size());
+    const std::uint32_t delayImportRawSize = hasDelayImports ? alignTo(delayImportVirtualSize, FileAlignment) : 0;
+    const std::uint32_t delayImportRawPointer = nextRawPointer;
+    if (hasDelayImports) {
+        nextRawPointer += delayImportRawSize;
+    }
+
     const std::uint32_t relocVirtualSize = static_cast<std::uint32_t>(baseRelocations.bytes.size());
     const std::uint32_t relocRawSize = hasBaseRelocations ? alignTo(relocVirtualSize, FileAlignment) : 0;
     const std::uint32_t relocRawPointer = nextRawPointer;
     if (hasBaseRelocations) {
         nextRawPointer += relocRawSize;
     }
-    const std::uint32_t finalImageEnd = hasBaseRelocations ? (baseRelocations.rva + relocVirtualSize) : (idataRva + idataVirtualSize);
+
+    // 计算最终镜像大小
+    std::uint32_t finalImageEnd = idataRva + idataVirtualSize;
+    if (hasDelayImports) {
+        finalImageEnd = delayImports.rva + delayImportVirtualSize;
+    }
+    if (hasBaseRelocations) {
+        finalImageEnd = baseRelocations.rva + relocVirtualSize;
+    }
     const std::uint32_t sizeOfImage = alignTo(finalImageEnd, SectionAlignment);
     const std::uint32_t fileSize = nextRawPointer;
 
@@ -1536,10 +2101,36 @@ void PeLinker::linkObjects(
     append32(file, 0);
     append32(file, hasBaseRelocations ? baseRelocations.rva : 0);
     append32(file, hasBaseRelocations ? relocVirtualSize : 0);
-    for (int i = 6; i < 16; ++i) {
-        append32(file, 0);
-        append32(file, 0);
-    }
+
+    // Data Directory 索引 6-8（Debug, Architecture, GlobalPtr）
+    append32(file, 0);
+    append32(file, 0);
+    append32(file, 0);
+    append32(file, 0);
+    append32(file, 0);
+    append32(file, 0);
+
+    // Data Directory 索引 9: TLS Table
+    append32(file, hasTls ? tlsLayout.directoryRva : 0);
+    append32(file, hasTls ? tlsLayout.directorySize : 0);
+
+    // Data Directory 索引 10-12（Load Config, Bound Import, IAT）
+    append32(file, 0);
+    append32(file, 0);
+    append32(file, 0);
+    append32(file, 0);
+    append32(file, 0);
+    append32(file, 0);
+
+    // Data Directory 索引 13: Delay Import Descriptor
+    append32(file, hasDelayImports ? delayImports.rva : 0);
+    append32(file, hasDelayImports ? delayImports.size : 0);
+
+    // Data Directory 索引 14-15（CLR Runtime Header, Reserved）
+    append32(file, 0);
+    append32(file, 0);
+    append32(file, 0);
+    append32(file, 0);
 
     for (const auto &section : sections) {
         const std::size_t header = file.size();
@@ -1561,6 +2152,17 @@ void PeLinker::linkObjects(
     write32(file, idataHeader + 20, idataRawPointer);
     write32(file, idataHeader + 36, 0xc0000040);
 
+    if (hasDelayImports) {
+        const std::size_t delayHeader = file.size();
+        file.resize(file.size() + 40, 0);
+        writeSectionName(file, delayHeader, ".didat");
+        write32(file, delayHeader + 8, delayImportVirtualSize);
+        write32(file, delayHeader + 12, delayImports.rva);
+        write32(file, delayHeader + 16, delayImportRawSize);
+        write32(file, delayHeader + 20, delayImportRawPointer);
+        write32(file, delayHeader + 36, 0xc0000040);
+    }
+
     if (hasBaseRelocations) {
         const std::size_t relocHeader = file.size();
         file.resize(file.size() + 40, 0);
@@ -1581,6 +2183,9 @@ void PeLinker::linkObjects(
         writeBytes(file, section.rawPointer, section.bytes);
     }
     writeBytes(file, idataRawPointer, imports.bytes);
+    if (hasDelayImports) {
+        writeBytes(file, delayImportRawPointer, delayImports.bytes);
+    }
     if (hasBaseRelocations) {
         writeBytes(file, relocRawPointer, baseRelocations.bytes);
     }

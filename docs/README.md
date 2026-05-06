@@ -1,56 +1,41 @@
-# Documentation Guide
+# 文档指南
 
-This directory contains two kinds of documents:
+本目录包含项目的长期文档和过程文档。
 
-- long-lived project documentation
-- process documentation for recent design and implementation work
+## 入门阅读
 
-## Start Here
+1. [project-overview.md](project-overview.md) — 项目概述：架构、特性、构建、源码结构
+2. [project-progress.md](project-progress.md) — 项目进度：当前状态、已完成任务、待办任务
+3. [pe-coff-linker-support.md](pe-coff-linker-support.md) — PE/COFF 链接器模型
+4. [minic-relocation-matrix.md](minic-relocation-matrix.md) — 重定位支持矩阵
+5. [testing-commands.md](testing-commands.md) — 测试命令参考
 
-If you are new to the repository, read in this order:
+## 长期文档
 
-1. [README.md](../README.md)
-2. [project-status-overview.md](project-status-overview.md)
-3. [pe-coff-linker-support.md](pe-coff-linker-support.md)
-4. [minic-relocation-matrix.md](minic-relocation-matrix.md)
-5. [testing-commands.md](testing-commands.md)
+- [project-overview.md](project-overview.md) — 项目概述：架构、语言特性、构建、源码结构
+- [project-progress.md](project-progress.md) — 项目进度：成熟度评估、已完成/待办任务
+- [pe-coff-linker-support.md](pe-coff-linker-support.md) — PE/COFF 链接器模型、边界、追踪输出
+- [minic-relocation-matrix.md](minic-relocation-matrix.md) — 当前流水线可生成的重定位类型
+- [testing-commands.md](testing-commands.md) — CTest 预设、标签和所有命名回归用例
+- [project-status-overview.md](project-status-overview.md) — 旧版状态概览（内容已合并到上述文档）
 
-## Long-Lived Documentation
+## 过程文档
 
-These files describe the project as it exists today and should stay useful over time.
+记录近期工作的设计、规划和进度历史。
 
-- [README.md](../README.md)
-  Main project entry point: build, run, test, supported subset.
-- [project-status-overview.md](project-status-overview.md)
-  Current overall maturity, strongest areas, weakest areas, next likely focus.
-- [pe-coff-linker-support.md](pe-coff-linker-support.md)
-  Current PE/COFF linker model, boundaries, trace output, and regression entry points.
-- [minic-relocation-matrix.md](minic-relocation-matrix.md)
-  Which relocation shapes the current `minic` pipeline can generate today, what is already supported, and which future C features will force new relocation work.
-- [testing-commands.md](testing-commands.md)
-  Central reference for CTest presets, labels, and every current named regression case.
-
-## Process Documentation
-
-These files capture how recent work was designed, planned, or tracked. They are useful for development history and rationale, but they are not the best first stop for understanding the current project state.
-
-### Specs
+### 设计文档
 
 - [2026-04-27-minic-types-multifile-linker-design.md](superpowers/specs/2026-04-27-minic-types-multifile-linker-design.md)
 - [2026-04-28-pe-coff-linker-teaching-design.md](superpowers/specs/2026-04-28-pe-coff-linker-teaching-design.md)
+- [2026-04-28-global-pointer-initializer-relocations-design.md](superpowers/specs/2026-04-28-global-pointer-initializer-relocations-design.md)
+- [2026-04-30-file-backed-import-catalog-design.md](superpowers/specs/2026-04-30-file-backed-import-catalog-design.md)
+- [2026-04-30-pe-base-relocation-support-design.md](superpowers/specs/2026-04-30-pe-base-relocation-support-design.md)
+- [2026-04-30-table-driven-import-resolver-design.md](superpowers/specs/2026-04-30-table-driven-import-resolver-design.md)
 
-### Plans And Progress
+### 规划和进度
 
 - [2026-04-27-minic-types-multifile-linker-plan.md](superpowers/plans/2026-04-27-minic-types-multifile-linker-plan.md)
 - [2026-04-28-bss-validation-progress.md](superpowers/plans/2026-04-28-bss-validation-progress.md)
-
-## Testing Entry Points
-
-Fastest regression commands:
-
-```powershell
-ctest --preset phase-current
-ctest --preset bss
-```
-
-These map to the test cases declared in [CMakeLists.txt](../CMakeLists.txt).
+- [2026-04-30-file-backed-import-catalog-plan.md](superpowers/plans/2026-04-30-file-backed-import-catalog-plan.md)
+- [2026-04-30-pe-base-relocation-support-plan.md](superpowers/plans/2026-04-30-pe-base-relocation-support-plan.md)
+- [2026-04-30-table-driven-import-resolver-plan.md](superpowers/plans/2026-04-30-table-driven-import-resolver-plan.md)

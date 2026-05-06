@@ -1,171 +1,114 @@
-# Project Status Overview
+# 项目状态概览
 
-Date: 2026-04-30
+日期：2026-05-06
 
-Document type:
+文档类型：长期状态文档
 
-- long-lived status document
-- summarizes the current project state rather than a single implementation session
+## 摘要
 
-## Summary
+minic 是一个功能完整的手写 C 编译器 + PE/COFF 链接器工具链，使用 C++17 实现。项目已从早期的前端玩具编译器发展为一个可工作的端到端编译器工具链。
 
-`minic` has moved beyond a front-end-only toy compiler and now works as a small end-to-end hand-written compiler toolchain.
+当前最强的部分是完整的编译流水线：从 C 源代码到 NASM 汇编、COFF/ELF 目标文件、再到自写的 PE 链接器生成可执行文件。优化器、诊断系统和测试覆盖也已达到可用水平。
 
-The strongest part of the project is no longer just parsing or code generation in isolation. The biggest milestone is that the repository now demonstrates a complete path from a small C subset to NASM assembly, COFF object files, and a self-written PE linker that produces working Windows executables.
+## 各阶段状态
 
-At the same time, the project is still intentionally narrow in scope. It is best understood as a focused hand-written compiler and linker prototype, not a broadly capable systems compiler.
+### 1. 前端（词法/语法/语义）
 
-## Status By Pipeline Stage
+**当前状态：**
+- 词法分析器、语法分析器、语义分析器对当前支持的 C 子集已基本稳定
+- 支持完整的类型系统：基本类型、指针、数组、结构体、联合体、枚举、typedef、函数指针
+- 支持所有主要控制流：if/else、while、for、do-while、switch/case/default、goto/label
+- 预处理器支持：#include、#define、#if/#ifdef/#else/#endif、#line、#pragma
+- 多文件并行解析
+- 彩色诊断输出，包含源文件位置和上下文
 
-### 1. Front End
+**成熟度：** 75%
 
-Current status:
+### 2. 代码生成
 
-- lexer, parser, and semantic analysis are broadly stable for the currently supported C subset
-- the project now supports more than trivial single-function programs
-- multi-file functions, global variables, and `.bss`-backed tentative definitions are already integrated into the front-end-to-linker flow
-- multi-file front-end parsing now runs per-source-file in parallel before the combined semantic pass
-- compile and link parallelism is now user-controllable through explicit worker-count settings
+**当前状态：**
+- Windows x64 和 Linux x64 双目标支持
+- Windows x64 调用约定（rcx, rdx, r8, r9 + 栈参数）
+- System V ABI 调用约定（rdi, rsi, rdx, rcx, r8, r9 + 栈参数）
+- 浮点运算完整支持（SSE xmm 寄存器）
+- 结构体按值传参/返回（小结构体通过寄存器，大结构体通过隐藏指针）
+- VLA（变长数组）运行时栈分配
+- 多文件并行代码生成
 
-Assessment:
+**成熟度：** 70%
 
-- this part is no longer the main bottleneck
-- the supported language subset is still intentionally small, but the current boundary is usable and coherent
+### 3. 优化器
 
-Approximate maturity:
+**当前状态：**
+- 常量折叠和常量传播
+- 死代码消除（不可达代码、恒真/恒假分支）
+- 强度削减（乘法→移位、取模→位与）
+- 循环不变量外提
+- 函数内联（简单单返回语句函数）
+- 尾调用优化
 
-- 60% to 70%
+**成熟度：** 60%
 
-### 2. Code Generation
+### 4. 链接器
 
-Current status:
+**当前状态：**
+- 内置 PE/COFF 链接器完整工作
+- ELF 链接通过 WSL gcc 支持
+- 多目标文件链接和跨文件符号解析
+- COFF 重定位处理（REL32, ADDR64, SECTION, SECREL）
+- PE 基址重定位（.reloc 节）
+- 导入表生成（kernel32.dll, msvcrt.dll 等）
+- 延迟加载导入和 TLS 支持
+- 文件导入目录扩展（config/import_catalog.txt）
+- 链接追踪输出
 
-- Windows x64 code generation is the main working path
-- Linux support already exists for assembly, object emission, and WSL-hosted system linking
-- the target abstraction is strong enough to support multiple output targets at the code generation layer
-- multi-file code generation and object assembly now run per translation unit in parallel
-- serial and parallel code paths now share the same command-line worker-count model
+**成熟度：** PE/COFF 80%，ELF 40%
 
-Assessment:
+### 5. 测试覆盖
 
-- the code generator is good enough to support the current project scope without being the main bottleneck
-- the main limitation here is feature breadth, not basic correctness on the supported path
+**当前状态：**
+- 128 个测试用例（119 通过，9 跳过 WSL/Linux 测试）
+- 覆盖所有主要功能：类型、控制流、结构体、指针、数组、函数、预处理器、优化器、链接器
+- 边界条件测试：深层嵌套、递归、隐式返回、字符串操作、嵌套调用
+- 错误诊断测试：类型不匹配、未声明变量、重复定义
 
-Approximate maturity:
+**成熟度：** 70%
 
-- about 65%
+## 最强领域
 
-### 3. Object Files And Linking
+最强的领域是端到端的编译流水线：
 
-Current status:
+- 完整的 C 语言前端（类型系统、控制流、预处理器）
+- 双目标代码生成（Windows + Linux）
+- 内置 PE/COFF 链接器
+- 优化器（常量传播、死代码消除、函数内联等）
+- 彩色诊断输出
+- 自动化回归测试
 
-- built-in PE linker exists and works on the current compiler-generated subset
-- section handling covers:
-  - `.text`
-  - `.data`
-  - `.rdata`
-  - `.bss`
-- cross-object external symbol resolution works
-- minimal import handling exists for `ExitProcess`
-- DLL-aware import grouping now exists for a small table-driven catalog across `kernel32.dll` and `msvcrt.dll`
-- repository-level file-backed import catalog extension now exists through `config/import_catalog.txt`
-- `REL32` relocation handling works on the current supported path
-- function-address `ADDR64` relocations from `.data` into `.text` now work on the current compiler-generated path
-- supported absolute-address image slots now emit PE `.reloc` metadata for rebasing
-- `.bss` section-symbol plus addend behavior has been debugged and fixed
-- `--link-trace` output now exposes:
-  - input objects
-  - object-level symbols and extern references
-  - merged sections
-  - resolved symbols
-  - relocations
-- automated regression coverage now exists for the current active feature set
-- regression execution now goes through a GoogleTest-based native test runner instead of PowerShell-only harnesses
-- object-file loading and COFF parsing are now parallelized before the serial merge and relocation stages
-- linker backends now receive one shared invocation model instead of ad hoc target-specific argument plumbing
+## 最弱领域
 
-Assessment:
+最弱的技术领域是：
 
-- this is the most distinctive and most valuable part of the project
-- this is where `minic` starts to feel like a real compiler toolchain rather than only a compiler front end
+1. **优化器深度** — CSE 尚未启用，寄存器分配未优化
+2. **错误恢复** — 解析器遇到第一个错误即停止，无拼写建议
+3. **标准合规** — 不完整的算术转换、有限的未定义行为检测
+4. **ELF 支持** — 依赖 WSL gcc，非内置链接器
 
-Approximate maturity:
+## 整体评估
 
-- current PE/COFF linker on the supported subset: about 75%
-- broader PE/COFF linker capability coverage: about 35% to 45%
+项目处于"可工作、可解释、可扩展"阶段：
 
-## Strongest Area
+- ✅ 完整的端到端编译工具链
+- ✅ 支持实用的 C 语言子集
+- ✅ 双平台代码生成
+- ✅ 内置 PE/COFF 链接器
+- ✅ 优化器和诊断系统
+- ⚠️ 尚未达到"广泛完整和健壮"阶段
 
-The strongest area in the project today is the end-to-end PE/COFF chain.
+## 推荐下一步
 
-That includes:
-
-- compiler front end
-- Windows code generation
-- COFF object emission through NASM
-- built-in PE linking
-- section-aware and relocation-aware debugging support
-- regression coverage for the current supported examples
-
-This is the part of the project with the clearest identity.
-
-## Weakest Area
-
-The weakest technical area in the full toolchain is still the PE/COFF linker's support breadth.
-
-This is not because the linker is low quality. It is because it now matters more than the rest of the pipeline. The project has already reached the point where the linker is the narrowest part of what the toolchain can safely accept and explain.
-
-The main weak spots are:
-
-- relocation coverage is still narrow
-- import handling is still intentionally small even though it now covers multiple DLLs, a few common C runtime calls, and a narrow file-backed extension path
-- compatibility with non-`minic` object producers is intentionally weak
-- failure diagnostics are functional but not yet systematic
-
-## Weakest Engineering Area
-
-The weakest engineering area is the depth of regression coverage relative to future linker growth.
-
-Recent work added useful automated tests for the current phase, but the coverage is still concentrated on the current happy path:
-
-- baseline single-file linking
-- `.bss` integrity
-- multi-file function resolution
-
-The next wave of growth will need:
-
-- more failure-case regression tests
-- more section and relocation combinations
-- clearer grouping of tests by development phase or linker feature
-
-## Overall Assessment
-
-The project is now best described as:
-
-- a working, inspectable end-to-end hand-written compiler toolchain
-- a strong PE/COFF linker prototype
-- not yet a broadly capable small systems compiler
-
-Approximate overall maturity:
-
-- the project is in a "working, explainable, extensible" stage
-- it is not yet in a "broadly complete and robust" stage
-
-## Recommended Next Focus
-
-The most natural next step is to keep improving the PE/COFF linker, because that is both:
-
-- the current identity of the project
-- the narrowest part of the toolchain
-
-Recommended priority order:
-
-1. Expand relocation coverage
-2. Add more failure-case and regression samples
-3. Extend import handling and file-backed catalog flexibility
-
-## Short Version
-
-In one sentence:
-
-The project's biggest success is that it already demonstrates a real compiler-to-linker pipeline, and its biggest weakness is that the linker still supports only a narrow, carefully controlled PE/COFF subset.
+1. **稳定性** — 修复 CSE、增强错误恢复、更严格的类型检查
+2. **语言特性** — 预处理条件编译完善、更多 C11/C17 特性
+3. **优化** — CSE 重新实现、寄存器分配、优化级别控制
+4. **工具链** — 调试信息生成、编译器性能优化
+5. **链接器** — 增量链接、更好的错误诊断、库文件支持

@@ -21,12 +21,40 @@ enum class TokenKind {
     KeywordFor,
     KeywordBreak,
     KeywordContinue,
+    KeywordDo,
+    KeywordSwitch,
+    KeywordCase,
+    KeywordDefault,
+    KeywordUnsigned,
+    KeywordSigned,
+    KeywordTypedef,
+    KeywordEnum,
+    KeywordUnion,
+    KeywordConst,
+    KeywordVolatile,
+    KeywordSizeof,
+    KeywordGoto,
+    KeywordFloat,
+    KeywordDouble,
+    KeywordStatic,
+    KeywordRestrict,
+    KeywordInline,
+    KeywordNoreturn,
+    KeywordAtomic,
+    KeywordAlignas,
+    KeywordThreadLocal,
+    KeywordStaticAssert,
+    KeywordGeneric,
+    KeywordAlignof,
+    KeywordBool,
+    FloatLiteral,
     LeftParen,
     RightParen,
     LeftBrace,
     RightBrace,
     LeftBracket,
     RightBracket,
+    Colon,
     Dot,
     Arrow,
     Semicolon,
@@ -45,14 +73,36 @@ enum class TokenKind {
     Less,
     LessEqual,
     Greater,
-    GreaterEqual
+    GreaterEqual,
+    Percent,
+    LessLess,
+    GreaterGreater,
+    Caret,
+    Pipe,
+    Tilde,
+    PlusPlus,
+    MinusMinus,
+    PlusEqual,
+    MinusEqual,
+    StarEqual,
+    SlashEqual,
+    PercentEqual,
+    LessLessEqual,
+    GreaterGreaterEqual,
+    AmpEqual,
+    CaretEqual,
+    PipeEqual,
+    Question,
+    DotDotDot
 };
 
 struct Token {
     TokenKind kind;
     std::string lexeme;
-    int intValue;
+    long long intValue;
+    double doubleValue = 0.0;
     std::string stringValue;
+    std::string stringPrefix;  // "L", "u8", "u", "U" 或空
     int line;
     int column;
 };

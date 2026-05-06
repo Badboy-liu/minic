@@ -1,9 +1,11 @@
 #include "Driver.h"
 
 #include "CodeGenerator.h"
+#include "Diagnostics.h"
 #include "Lexer.h"
 #include "Optimizer.h"
 #include "Parser.h"
+#include "Preprocessor.h"
 #include "Semantics.h"
 #include "Toolchain.h"
 
@@ -45,7 +47,7 @@ std::vector<Result> runParallelTasks(std::size_t taskCount, unsigned int request
 
     if (workerCountFor(taskCount, requestedJobs) == 1) {
         for (std::size_t i = 0; i < taskCount; ++i) {
-            results.push_back(factory(i)());
+            results.push_back(std::move(factory(i)()));
         }
         return results;
     }
@@ -56,7 +58,7 @@ std::vector<Result> runParallelTasks(std::size_t taskCount, unsigned int request
         futures.push_back(std::async(std::launch::async, factory(i)));
     }
     for (auto &future : futures) {
-        results.push_back(future.get());
+        results.push_back(std::move(future.get()));
     }
     return results;
 }
@@ -65,6 +67,8 @@ struct ParsedTranslationUnit {
     Program program;
     std::size_t functionCount = 0;
     std::size_t globalCount = 0;
+    DiagnosticEngine diag;
+    std::vector<fs::path> includedFiles;
 };
 
 struct PreparedTranslationUnit {
@@ -116,18 +120,39 @@ int Driver::run(const fs::path &selfPath, const std::vector<std::string> &args) 
     Program combinedProgram;
     std::vector<std::size_t> functionCounts;
     std::vector<std::size_t> globalCounts;
+    DiagnosticEngine diag;
     std::vector<ParsedTranslationUnit> parsedUnits =
         runParallelTasks<ParsedTranslationUnit>(sourceInputs.size(), requestedJobs, [&](std::size_t index) {
             return [&, index]() {
-                const std::string source = readFile(sourceInputs[index]);
-                Lexer lexer(source);
-                Parser parser(lexer.tokenize());
-                Program fileProgram = parser.parseProgram();
-
+                const std::string rawSource = readFile(sourceInputs[index]);
                 ParsedTranslationUnit unit;
-                unit.functionCount = fileProgram.functions.size();
-                unit.globalCount = fileProgram.globals.size();
-                unit.program = std::move(fileProgram);
+                unit.diag.setSourceFile(sourceInputs[index].string());
+                unit.diag.setWarningLevel(static_cast<WarningLevel>(options.warningLevel));
+                unit.diag.setWarningsAsErrors(options.warningsAsErrors);
+                Preprocessor preprocessor(options.includePaths, &unit.diag);
+                for (const auto &def : options.defines) {
+                    auto eq = def.find('=');
+                    if (eq != std::string::npos) {
+                        preprocessor.addDefine(def.substr(0, eq), def.substr(eq + 1));
+                    } else {
+                        preprocessor.addDefine(def);
+                    }
+                }
+                const std::string source = preprocessor.processSource(sourceInputs[index], rawSource);
+                unit.diag.setSourceContent(source);
+                // 收集被包含的文件（用于依赖文件生成）
+                std::vector<fs::path> includedFiles;
+                includedFiles.push_back(sourceInputs[index]);
+                for (const auto &f : preprocessor.getIncludedFiles()) {
+                    includedFiles.push_back(f);
+                }
+                Lexer lexer(source, &unit.diag);
+                auto tokens = lexer.tokenize();
+                Parser parser(std::move(tokens), &unit.diag);
+                unit.program = parser.parseProgram();
+                unit.functionCount = unit.program.functions.size();
+                unit.globalCount = unit.program.globals.size();
+                unit.includedFiles = std::move(includedFiles);
                 return unit;
             };
         });
@@ -135,22 +160,79 @@ int Driver::run(const fs::path &selfPath, const std::vector<std::string> &args) 
     for (auto &parsedUnit : parsedUnits) {
         functionCounts.push_back(parsedUnit.functionCount);
         globalCounts.push_back(parsedUnit.globalCount);
+        // 合并解析阶段的诊断信息（保留源文件路径）
+        for (const auto &d : parsedUnit.diag.diagnostics()) {
+            diag.setSourceFile(d.filePath);
+            diag.report(d.severity, d.line, d.column, d.message);
+        }
         for (auto &function : parsedUnit.program.functions) {
             combinedProgram.functions.push_back(std::move(function));
         }
         for (auto &global : parsedUnit.program.globals) {
             combinedProgram.globals.push_back(std::move(global));
         }
+        for (auto &assertStmt : parsedUnit.program.globalStaticAsserts) {
+            combinedProgram.globalStaticAsserts.push_back(std::move(assertStmt));
+        }
+    }
+
+    // 生成依赖文件（-M 或 -MD）
+    if (options.depFileOnly || options.depFileGenerate) {
+        fs::path depPath = options.depFilePath;
+        if (depPath.empty()) {
+            // 默认依赖文件名：将第一个输入文件的扩展名替换为 .d
+            depPath = sourceInputs.front().stem().string() + ".d";
+        }
+        // 收集所有被包含的文件（去重）
+        std::unordered_set<fs::path> allIncluded;
+        for (const auto &unit : parsedUnits) {
+            for (const auto &f : unit.includedFiles) {
+                allIncluded.insert(f);
+            }
+        }
+        // 生成 Makefile 格式的依赖文件
+        std::ostringstream depOut;
+        for (const auto &src : sourceInputs) {
+            // 目标文件名：将 .c 替换为 .o
+            std::string target = src.stem().string() + ".o";
+            depOut << target << ":";
+            for (const auto &f : allIncluded) {
+                depOut << " " << f.string();
+            }
+            depOut << "\n";
+        }
+        writeFile(depPath, depOut.str());
+        if (options.depFileOnly) {
+            // -M: 只输出依赖，不编译
+            return 0;
+        }
+    }
+
+    // 如果解析阶段已有错误，输出诊断信息并终止
+    if (diag.hasErrors()) {
+        diag.printAll(std::cerr);
+        return 1;
     }
 
     std::vector<Function> globalDefinitions;
     std::vector<GlobalVar> globalVariables;
     if (!sourceInputs.empty()) {
-        SemanticAnalyzer semanticAnalyzer;
+        SemanticAnalyzer semanticAnalyzer(&diag);
+        semanticAnalyzer.setShadowWarning(options.enableShadowWarning || options.warningLevel >= 2);
+        semanticAnalyzer.setUnusedParamWarning(options.enableUnusedParamWarning || options.warningLevel >= 3);
         const bool requireMain = !options.assemblyOnly && !options.compileOnly;
-        semanticAnalyzer.analyze(combinedProgram, requireMain);
+        try {
+            semanticAnalyzer.analyze(combinedProgram, requireMain);
+        } catch (const std::runtime_error &) {
+            // 语义错误已通过 diag 收集
+        }
+        // 如果语义分析阶段有错误，输出诊断信息并终止
+        if (diag.hasErrors()) {
+            diag.printAll(std::cerr);
+            return 1;
+        }
         Optimizer optimizer;
-        optimizer.optimize(combinedProgram);
+        optimizer.optimize(combinedProgram, options.optimizationLevel);
 
         for (const auto &function : combinedProgram.functions) {
             if (!function.isDeclaration()) {
@@ -158,6 +240,7 @@ int Driver::run(const fs::path &selfPath, const std::vector<std::string> &args) 
                 declaration.name = function.name;
                 declaration.returnType = function.returnType;
                 declaration.parameters = function.parameters;
+                declaration.isVariadic = function.isVariadic;
                 globalDefinitions.push_back(std::move(declaration));
             }
         }
@@ -227,6 +310,7 @@ int Driver::run(const fs::path &selfPath, const std::vector<std::string> &args) 
                 externalDeclaration.name = declaration.name;
                 externalDeclaration.returnType = declaration.returnType;
                 externalDeclaration.parameters = declaration.parameters;
+                externalDeclaration.isVariadic = declaration.isVariadic;
                 fileProgram.functions.push_back(std::move(externalDeclaration));
             }
         }
@@ -319,10 +403,16 @@ int Driver::run(const fs::path &selfPath, const std::vector<std::string> &args) 
     objPaths.insert(objPaths.end(), objectInputs.begin(), objectInputs.end());
 
     if (options.assemblyOnly) {
+        if (!diag.diagnostics().empty()) {
+            diag.printAll(std::cerr);
+        }
         return 0;
     }
 
     if (options.compileOnly) {
+        if (!diag.diagnostics().empty()) {
+            diag.printAll(std::cerr);
+        }
         return 0;
     }
 
@@ -342,11 +432,46 @@ int Driver::run(const fs::path &selfPath, const std::vector<std::string> &args) 
         }
     }
 
+    if (!diag.diagnostics().empty()) {
+        diag.printAll(std::cerr);
+    }
     std::cout << "Generated executable: " << options.outputPath.string() << '\n';
     return 0;
 }
 
-Driver::Options Driver::parseOptions(const std::vector<std::string> &args) const {
+// 展开响应文件（@file）：将 @file 替换为文件中的参数
+static std::vector<std::string> expandResponseFiles(const std::vector<std::string> &args) {
+    std::vector<std::string> expanded;
+    for (const auto &arg : args) {
+        if (!arg.empty() && arg[0] == '@') {
+            std::string path = arg.substr(1);
+            std::ifstream in(path);
+            if (!in) {
+                throw std::runtime_error("cannot open response file: " + path);
+            }
+            std::string line;
+            while (std::getline(in, line)) {
+                // 移除行尾 \r
+                if (!line.empty() && line.back() == '\r') {
+                    line.pop_back();
+                }
+                // 跳过空行和注释
+                auto trimmed = line.find_first_not_of(" \t");
+                if (trimmed == std::string::npos || line[trimmed] == '#') continue;
+                // 提取到行尾或注释
+                auto end = line.find_first_of(" \t#", trimmed);
+                if (end == std::string::npos) end = line.size();
+                expanded.push_back(line.substr(trimmed, end - trimmed));
+            }
+        } else {
+            expanded.push_back(arg);
+        }
+    }
+    return expanded;
+}
+
+Driver::Options Driver::parseOptions(const std::vector<std::string> &rawArgs) const {
+    const std::vector<std::string> args = expandResponseFiles(rawArgs);
     if (args.empty()) {
         throw std::runtime_error(usage());
     }
@@ -354,7 +479,11 @@ Driver::Options Driver::parseOptions(const std::vector<std::string> &args) const
     Options options;
 
     for (std::size_t i = 0; i < args.size(); ++i) {
-        if (args[i] == "-o") {
+        if (args[i] == "--help" || args[i] == "-h") {
+            throw std::runtime_error(usage());
+        } else if (args[i] == "--version") {
+            throw std::runtime_error("minic 0.1.0 (C compiler + PE/COFF linker, x86_64)");
+        } else if (args[i] == "-o") {
             if (i + 1 >= args.size()) {
                 throw std::runtime_error("missing file name after -o");
             }
@@ -382,11 +511,53 @@ Driver::Options Driver::parseOptions(const std::vector<std::string> &args) const
         } else if (args[i] == "-c") {
             options.compileOnly = true;
             options.keepObject = true;
+        } else if (args[i] == "-I") {
+            if (i + 1 >= args.size()) {
+                throw std::runtime_error("missing directory path after -I");
+            }
+            options.includePaths.push_back(args[++i]);
+        } else if (args[i].rfind("-I", 0) == 0 && args[i].size() > 2) {
+            // 支持 -Ipath 形式（无空格）
+            options.includePaths.push_back(args[i].substr(2));
+        } else if (args[i] == "-D") {
+            if (i + 1 >= args.size()) {
+                throw std::runtime_error("missing macro name after -D");
+            }
+            options.defines.push_back(args[++i]);
+        } else if (args[i].rfind("-D", 0) == 0 && args[i].size() > 2) {
+            options.defines.push_back(args[i].substr(2));
+        } else if (args[i] == "-Wall") {
+            options.warningLevel = 2;
+        } else if (args[i] == "-Wextra") {
+            options.warningLevel = 3;
+        } else if (args[i] == "-Werror") {
+            options.warningsAsErrors = true;
+        } else if (args[i] == "-Wshadow") {
+            options.enableShadowWarning = true;
+        } else if (args[i] == "-Wunused-parameter") {
+            options.enableUnusedParamWarning = true;
+        } else if (args[i] == "-M") {
+            options.depFileOnly = true;
+        } else if (args[i] == "-MD") {
+            options.depFileGenerate = true;
+        } else if (args[i] == "-MF") {
+            if (i + 1 >= args.size()) {
+                throw std::runtime_error("missing filename after -MF");
+            }
+            options.depFilePath = args[++i];
+        } else if (args[i] == "-w") {
+            options.warningLevel = 0;
         } else if (args[i] == "--target") {
             if (i + 1 >= args.size()) {
                 throw std::runtime_error("missing target name after --target");
             }
             options.target = parseTargetName(args[++i]);
+        } else if (args[i].rfind("-O", 0) == 0 && args[i].size() == 3) {
+            char level = args[i][2];
+            if (level < '0' || level > '2') {
+                throw std::runtime_error("unsupported optimization level: " + args[i] + " (supported: -O0, -O1, -O2)");
+            }
+            options.optimizationLevel = level - '0';
         } else {
             options.inputPaths.push_back(args[i]);
         }
@@ -435,7 +606,7 @@ fs::path Driver::linkerExecutablePath(const fs::path &selfPath) {
 
 bool Driver::isObjectInput(const fs::path &path) {
     const std::string extension = path.extension().string();
-    return extension == ".obj" || extension == ".o";
+    return extension == ".obj" || extension == ".o" || extension == ".lib" || extension == ".a";
 }
 
 bool Driver::isAssemblyInput(const fs::path &path) {
@@ -472,5 +643,29 @@ unsigned int Driver::sanitizeJobs(unsigned int requestedJobs) {
 }
 
 std::string Driver::usage() {
-    return "Usage: minic <input.c|input.asm|input.obj|input.o>... [--target x86_64-windows|x86_64-linux] [-S] [-c] [-o output] [--emit-asm output.asm] [--keep-obj] [--link-trace] [-j N|--jobs N]";
+    return "Usage: minic <input.c|input.asm|input.obj|input.o>... [options]\n\n"
+           "Options:\n"
+           "  --target <target>     Target: x86_64-windows (default), x86_64-linux\n"
+           "  -O0|-O1|-O2           Optimization level (default: -O2)\n"
+           "  -S                    Compile to assembly only\n"
+           "  -c                    Compile to object file only\n"
+           "  -o <file>             Output file path\n"
+           "  --emit-asm <file>     Emit assembly to file\n"
+           "  --keep-obj            Keep intermediate object file\n"
+           "  --link-trace          Print linker trace\n"
+           "  -j N|--jobs N         Parallel compilation jobs\n"
+           "  -I <dir>              Add include search path\n"
+           "  -D <name>[=value]     Define macro\n"
+           "  -M                    Output dependency file only (no compile)\n"
+           "  -MD                   Compile and generate dependency file\n"
+           "  -MF <file>            Dependency file output path\n"
+           "  -Wall                 Enable all warnings\n"
+           "  -Wextra               Enable extra warnings\n"
+           "  -Wshadow              Warn about shadowed variables\n"
+           "  -Wunused-parameter    Warn about unused parameters\n"
+           "  -Werror               Treat warnings as errors\n"
+           "  -w                    Suppress all warnings\n"
+           "  @<file>               Read arguments from response file\n"
+           "  --help                Show this help message\n"
+           "  --version             Show version information";
 }

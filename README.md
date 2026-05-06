@@ -1,367 +1,210 @@
 # Mini C Compiler
 
-This project is a small hand-written C compiler written in C++.
+手写的 C 编译器 + PE/COFF 链接器，使用 C++17 实现。
 
-It implements the pipeline in clear stages:
+## 编译流水线
 
-- Lexing: convert source text into tokens
-- Parsing: build an AST for a small C subset
-- Semantic analysis: resolve locals, reject undeclared or duplicate variables, compute stack layout
-- Code generation: emit Windows x64 NASM assembly
-- Linking: invoke the configured assembler to produce an object, then hand final linking to the standalone `minic-link` driver
-
-For multi-file builds, `minic` now parallelizes per-file lex/parse work and per-translation-unit assembly/object generation. `minic-link` also parallelizes object-file loading before the serial merge and relocation phases.
-
-Parallelism is user-controllable through `-j N` or `--jobs N`. Use `-j 1` to force a fully serial compile or link path when debugging.
-
-## Documentation
-
-Primary docs:
-
-- [Documentation Guide](docs/README.md)
-- [Project Status Overview](docs/project-status-overview.md)
-- [PE/COFF Linker Support](docs/pe-coff-linker-support.md)
-- [minic Relocation Matrix](docs/minic-relocation-matrix.md)
-- [Testing Commands](docs/testing-commands.md)
-
-Document types:
-
-- Long-lived docs describe the project as it works today.
-- Process docs under [docs/superpowers](docs/superpowers) record design, planning, and progress history for specific workstreams.
-
-## Supported C subset
-
-The current compiler supports:
-
-- multiple `char` / `short` / `int` / `long` / `long long` / `void` functions
-- function declarations and later definitions
-- function pointer parameters such as `int call(int (*fn)(int), int value)`
-- named `struct` definitions attached to a variable/function declarator
-- local and global `struct` variables
-- `value.member`, `(*ptr).member`, and `ptr->member` for supported structs
-- one-level sequential `struct` initializer lists for supported scalar/pointer members
-- by-value `struct` parameter passing and return on the current Windows x64 path
-- external function declarations resolved either from other input objects or the built-in import map
-- global integer variables
-- global `char[]` variables
-- global integer arrays with initializer lists
-- global pointer initializers for `&global_object`
-- global pointer initializers for function names such as `int (*p)() = answer;`
-- global pointer initializers for string literals such as `char *p = "A";`
-- global function pointer arrays with initializer lists such as `int (*table[2])() = { one, two };`
-- tentative global definitions emitted via `.bss`
-- `void` functions
-- integer and pointer parameters, including Windows x64 stack-passed arguments beyond the first four
-- mixed integer-type arithmetic, assignment, argument passing, and `return` conversion across `char` / `short` / `int` / `long` / `long long`
-- pointer parameters and locals
-- local arrays of non-void element types
-- local integer arrays with initializer lists
-- local pointer arrays with restricted initializer lists
-- function calls
-- address-of `&`, dereference `*`, and `[]` indexing
-- local `int` declarations
-- assignment
-- integer literals
-- `+ - * /`
-- `! && ||`
-- `== != < <= > >=`
-- `if`, `if/else`
-- `while`
-- `for`
-- `break`, `continue`
-- nested `{ ... }` blocks
-- `return`
-
-## Build the compiler
-
-```powershell
-cmake --preset default --fresh
-cmake --build --preset debug
+```
+源代码 → 预处理 → 词法分析 → 语法分析 → 语义分析 → 优化 → 代码生成 → 链接 → 可执行文件
 ```
 
-On Windows, the regression runner now depends on GoogleTest. The current CMake setup looks for it through `VCPKG_ROOT` first and falls back to `D:/vcpkg` when that local path exists.
+## 支持的 C 语言特性
 
-## Compile a C file
+### 类型系统
+- 基本类型：`char`, `short`, `int`, `long`, `long long`, `void`, `_Bool`, `float`, `double`
+- `unsigned` 修饰符
+- `const` 限定符
+- 指针类型（多级指针、`void *`）
+- 数组类型（多维数组、VLA 变长数组）
+- 结构体（`struct`）：本地/全局、嵌套初始化、按值传参/返回、位域、匿名成员
+- 联合体（`union`）
+- 枚举（`enum`）
+- `typedef` 类型别名
+- 函数指针类型
+- 复合字面量（compound literals）
+- 指定初始化器（designated initializers）
+- 柔性数组成员（flexible array members）
+
+### 控制流
+- `if` / `else`
+- `while` / `for` / `do-while`
+- `switch` / `case` / `default`（含 fall-through 支持）
+- `break` / `continue`
+- `goto` / 标签
+- 三元运算符 `?:`
+- 逗号运算符
+
+### 运算符
+- 算术：`+ - * / %`
+- 比较：`== != < <= > >=`
+- 逻辑：`! && ||`
+- 位运算：`& | ^ ~ << >>`
+- 赋值：`= += -= *= /= %= &= |= ^= <<= >>=`
+- 自增/自减：`++ --`（前缀和后缀）
+- 取地址/解引用：`& *`
+- 下标访问：`[]`
+- 成员访问：`. ->`
+- 类型转换：`(type)`
+- `sizeof` / `_Alignof`
+
+### 函数特性
+- 函数声明和定义
+- 可变参数函数（`va_list`, `va_start`, `va_arg`, `va_end`）
+- 静态局部变量
+- 函数内联优化（对简单函数）
+
+### 预处理器
+- `#include`（尖括号和双引号）
+- `#define` / `#undef` 宏定义
+- `#if` / `#ifdef` / `#ifndef` / `#else` / `#elif` / `#endif` 条件编译
+- `#line` 行号指令
+- `#pragma` 指令
+- 预定义宏：`__FILE__`, `__LINE__`, `__DATE__`, `__TIME__`, `__minic__`
+- 字符串化运算符 `#` 和标记粘贴运算符 `##`
+- `#` / `##` 预处理运算符
+
+### 其他特性
+- `_Static_assert` 静态断言
+- `_Generic` 泛型选择
+- 字符字面量（含转义序列）
+- 字符串字面量
+- 全局变量（初始化和未初始化/BSS）
+
+## 优化器
+
+编译器在语义分析和代码生成之间运行优化遍（pass）：
+
+- **常量折叠** — 编译时计算常量表达式
+- **常量传播** — 跟踪已知常量变量并替换
+- **死代码消除** — 移除不可达代码和恒真/恒假分支
+- **强度削减** — `x * 2^n` → `x << n`，`x % 2^n` → `x & (2^n-1)`
+- **循环不变量外提** — 将循环内不变的赋值移到循环前
+- **函数内联** — 将简单函数调用替换为函数体
+- **尾调用优化** — `return f(x)` 内联 epilogue 避免额外跳转
+
+## 代码生成
+
+### Windows x86_64
+- NASM 汇编输出
+- Windows x64 调用约定（rcx, rdx, r8, r9 + 栈参数）
+- 浮点参数通过 xmm0-xmm3 传递
+- 大结构体通过隐藏返回指针传递
+- PE/COFF 目标文件生成
+
+### Linux x86_64
+- NASM 汇编输出（ELF64 格式）
+- System V ABI 调用约定（rdi, rsi, rdx, rcx, r8, r9 + 栈参数）
+- 浮点参数通过 xmm0-xmm7 传递
+- ELF 目标文件生成
+
+## 链接器
+
+内置 PE/COFF 链接器（`minic-link`）支持：
+
+- 多目标文件链接
+- 跨文件符号解析
+- COFF 重定位处理（REL32, ADDR64, SECTION, SECREL）
+- PE 基址重定位（`.reloc` 节）
+- 导入表生成（kernel32.dll, msvcrt.dll 等）
+- 延迟加载导入
+- TLS（线程本地存储）
+- 文件导入目录（`config/import_catalog.txt`）
+- Linux ELF 链接（通过 WSL gcc）
+
+## 构建
 
 ```powershell
+cmake --build build --config Debug
+```
+
+## 运行
+
+```powershell
+# 编译单个文件
 .\build\Debug\minic.exe .\input\answer.c
-```
 
-The compiler writes generated files under `build/output/` by default:
-
-```powershell
-.\build\output\answer.asm
-.\build\output\answer.exe
-```
-
-The linker is also available as a standalone executable:
-
-```powershell
-.\build\Debug\minic-link.exe .\build\output\answer.obj -o .\build\output\answer_from_linker.exe
-.\build\Debug\minic-link.exe .\build\output\a.obj .\build\output\b.obj -j 1 -o .\build\output\app.exe
-```
-
-Internally, `minic-link` now dispatches through target-specific linker backends instead of keeping all Windows and Linux linker logic inside `Toolchain.cpp`. The backend boundary now uses one shared linker invocation model, so target name, object inputs, output path, link tracing, and requested worker count all flow through the same interface. Today that means a built-in PE/COFF backend for `x86_64-windows` and a WSL-hosted system-linker backend for `x86_64-linux`.
-
-The default target is `x86_64-windows`. You can request targets explicitly:
-
-```powershell
-.\build\Debug\minic.exe .\input\answer.c --target x86_64-windows
-.\build\Debug\minic.exe .\input\answer.c --target x86_64-linux -S --emit-asm .\build\output\answer_linux.asm
-.\build\Debug\minic.exe .\input\answer.c --target x86_64-linux -c -o .\build\output\answer_linux.o
-```
-
-Linux code generation currently supports ELF64 assembly/object output through the configured assembler, including SysV-style integer/pointer argument passing through `rdi, rsi, rdx, rcx, r8, r9` plus stack arguments beyond the first six. Linux executable linking now goes through a WSL-hosted system linker path (`wsl gcc -nostdlib -no-pie ...`), so it requires a working WSL distribution with `gcc` installed.
-
-You can also compile multiple files into one executable:
-
-```powershell
+# 编译多个文件
 .\build\Debug\minic.exe .\input\file1.c .\input\file2.c -o .\build\output\app.exe
+
+# 只生成汇编
+.\build\Debug\minic.exe .\input\answer.c -S
+
+# 只生成目标文件
+.\build\Debug\minic.exe .\input\answer.c -c
+
+# 指定目标平台
+.\build\Debug\minic.exe .\input\answer.c --target x86_64-linux
+
+# 链接追踪
+.\build\Debug\minic.exe .\input\answer.c --link-trace
+
+# 并行编译
+.\build\Debug\minic.exe .\input\*.c -j 4
+
+# 独立链接器
+.\build\Debug\minic-link.exe .\build\output\answer.obj -o .\build\output\answer.exe
 ```
 
-You can also mix C sources with direct assembly inputs on targets that support the configured assembler format:
+## 测试
 
 ```powershell
-.\build\Debug\minic.exe .\input\tmp_direct_asm_main.c .\input\tmp_direct_asm_helper.asm -o .\build\output\mixed.exe
+# 运行所有测试
+.\build\Debug\minic_gtests.exe
+
+# 运行指定测试
+.\build\Debug\minic_gtests.exe --gtest_filter="*minic_answer*"
+
+# 运行编译器测试
+.\build\Debug\minic_gtests.exe --gtest_filter="Compiler/*"
+
+# 运行链接器测试
+.\build\Debug\minic_gtests.exe --gtest_filter="Linker/*"
 ```
 
-You can also link existing Windows COFF objects alongside C inputs on the currently supported Windows path:
+## 源码结构
 
-```powershell
-.\build\Debug\minic.exe .\input\main.c .\build\output\helper.obj -o .\build\output\app.exe
+```
+src/
+├── app/           # Driver 入口和顶层编排
+├── frontend/      # 词法分析、语法分析、语义分析、AST
+│   ├── Lexer      # 词法分析器
+│   ├── Parser     # 语法分析器
+│   ├── Semantics  # 语义分析器
+│   ├── Token      # Token 定义
+│   ├── Ast        # AST 节点定义
+│   └── Diagnostics # 诊断引擎
+├── backend/       # 代码生成和优化
+│   ├── CodeGenerator  # NASM 代码生成
+│   └── Optimizer      # 优化器
+├── linker/        # PE/COFF 链接器
+│   ├── PeLinker           # PE 链接器实现
+│   ├── LinkerBackend      # 链接器后端接口
+│   ├── BuiltinPeCoffLinkerBackend  # 内置 PE 后端
+│   ├── WslGccElfLinkerBackend     # WSL ELF 后端
+│   └── LinkerDriver       # 链接器驱动
+└── support/       # 工具链和进程辅助
 ```
 
-Or invoke the linker directly once objects already exist:
+## 诊断输出
 
-```powershell
-.\build\Debug\minic.exe .\input\answer.c -c -o .\build\output\answer.obj
-.\build\Debug\minic-link.exe .\build\output\answer.obj -o .\build\output\answer_link_only.exe
+编译器提供彩色诊断输出，包含源文件位置和上下文：
+
+```
+input/test.c:5:15: error: use of undeclared variable: y
+    return x + y;
+               ^
 ```
 
-Each input file is compiled into its own assembly file and object file. Multi-file builds parse and lower those translation units in parallel, then the linker resolves external function symbols across the resulting objects so functions defined in one `.c` file can be called from another `.c` file.
-
-Between semantic analysis and final code generation, `minic` now also runs a small optimizer pass. Today it performs conservative integer constant folding, which keeps the optimization boundary explicit without introducing a full IR yet.
-
-Global variables are emitted into `.data` when initialized and `.bss` when they are uninitialized/tentative definitions. The built-in PE linker preserves section-relative offsets for NASM COFF `REL32` relocations, so multiple globals placed in `.bss` keep distinct addresses in the final executable. It also supports the current compiler's minimal `.data` `ADDR64` relocation path for global pointer initializers such as `int *p = &x;`, `char *p = "A";`, `int (*fn_ptr)() = answer;`, and `int (*fn_table[2])() = { one, two };`. It also supports the current `.text` `ADDR64` helper-object subset on the Windows path. For supported absolute-address sites, the linker now also synthesizes a PE `.reloc` section with `DIR64` base relocations, so those executables remain correct after rebasing instead of relying on a fixed preferred image base.
-
-The linker now also supports a small table-driven import catalog across multiple DLLs. Today that includes these built-in entries:
-
-- `kernel32.dll!ExitProcess`
-- `kernel32.dll!GetCurrentProcessId`
-- `msvcrt.dll!puts`
-- `msvcrt.dll!putchar`
-- `msvcrt.dll!printf`
-
-That means ordinary external declarations such as `extern int puts(char *text);`, `extern int putchar(int ch);`, and conservative simple `printf` calls can now link through the built-in PE import machinery without adding new source syntax. The import source is still built into the linker today; user-defined import catalogs are not implemented yet.
-
-In addition, `minic-link` now loads an additive repository catalog from `config/import_catalog.txt` when that file exists. Each non-comment row uses:
-
-```text
-symbol|dll|import
-```
-
-For example:
-
-```text
-fn_strlen|msvcrt.dll|strlen
-```
-
-File-backed entries can extend the built-in catalog, but they cannot override built-in symbols.
-
-## Quick Check
-
-Fastest way to run the current phase regression suite:
-
-```powershell
-ctest --preset phase-current
-```
-
-Fastest way to run only the module you changed:
-
-```powershell
-ctest --preset frontend
-ctest --preset backend
-ctest --preset linker
-ctest --preset optimizer
-```
-
-Fastest way to run only the `.bss` case:
-
-```powershell
-ctest --preset bss
-```
-
-Fastest way to run only the import cases:
-
-```powershell
-ctest --preset imports
-```
-
-The file-backed import case is part of that preset and uses the repository catalog under `config/import_catalog.txt`.
-
-Fastest way to run only the relocation cases:
-
-```powershell
-ctest --preset relocations
-```
-
-Fastest way to run only the explicit linker failure cases:
-
-```powershell
-ctest --preset linker-failures
-```
-
-Fastest way to run the Linux system-linker cases:
-
-```powershell
-ctest --preset linux-link
-```
-
-## Manual Verification
-
-Sample program:
-
-```powershell
-.\build\Debug\minic.exe .\input\answer.c
-.\build\output\answer.exe
-$LASTEXITCODE
-```
-
-`.bss` integrity sample with link trace:
-
-```powershell
-.\build\Debug\minic.exe .\input\tmp_bss_integrity.c --link-trace --keep-obj
-```
-
-The trace prints:
-
-- input object summaries
-- object-level defined symbols and extern references
-- merged section layout
-- import groups by DLL
-- resolved symbols
-- applied `REL32` and minimal `ADDR64` relocations
-- synthesized PE base relocations for rebasing-sensitive absolute addresses
-
-To verify multi-object PE linking:
-
-```powershell
-.\build\Debug\minic.exe .\input\tmp_multi_main.c .\input\tmp_multi_math.c --link-trace -o .\build\output\tmp_multi_trace.exe
-.\build\output\tmp_multi_trace.exe
-$LASTEXITCODE
-```
-
-To verify the mixed C plus hand-written NASM object path:
-
-```powershell
-D:\software\nasm\nasm.exe -f win64 -o .\build\test-objects\tmp_link_text_addr64_helper.obj .\input\tmp_link_text_addr64_helper.asm
-.\build\Debug\minic.exe .\input\tmp_link_text_addr64_main.c .\build\test-objects\tmp_link_text_addr64_helper.obj --link-trace -o .\build\output\tmp_link_text_addr64_manual.exe
-.\build\output\tmp_link_text_addr64_manual.exe
-$LASTEXITCODE
-```
-
-Expected exit code:
-
-```text
-42
-```
-
-To verify the Linux system-linker path through WSL:
-
-```powershell
-.\build\Debug\minic.exe .\input\answer.c --target x86_64-linux -o .\build\output\answer_linux
-wsl /mnt/d/project/cpp/demo2/build/output/answer_linux
-```
-
-Expected exit code:
-
-```text
-42
-```
-
-## Run Tests
-
-Fastest commands:
-
-```powershell
-ctest --preset phase-current
-ctest --preset frontend
-ctest --preset backend
-ctest --preset linker
-ctest --preset bss
-```
-
-Explicit underlying CTest command for the current phase:
-
-```powershell
-ctest --test-dir .\build -C Debug -L phase-current --output-on-failure
-```
-
-Current regression cases are declared in [CMakeLists.txt](CMakeLists.txt) and executed through the GoogleTest-based runner in [tests/minic_regression_tests.cpp](tests/minic_regression_tests.cpp) plus [tests/regression_test_utils.cpp](tests/regression_test_utils.cpp). CTest still orchestrates named cases and labels, but the underlying compile/link/run assertions now live in one native test binary instead of PowerShell-driven harnesses.
-
-To run a single example by test name:
-
-```powershell
-ctest --test-dir .\build -C Debug -R minic_bss_integrity --output-on-failure
-```
-
-To run only the DLL-aware import regressions:
-
-```powershell
-ctest --preset imports
-```
-
-To run only the relocation-focused regressions:
-
-```powershell
-ctest --preset relocations
-```
-
-To run only the explicit linker-failure regressions:
-
-```powershell
-ctest --preset linker-failures
-```
-
-To run only the Linux system-linker regressions:
-
-```powershell
-ctest --preset linux-link
-```
-
-To run module-focused labels without presets:
-
-```powershell
-ctest --test-dir .\build -C Debug -L frontend --output-on-failure
-ctest --test-dir .\build -C Debug -L backend --output-on-failure
-ctest --test-dir .\build -C Debug -L linker --output-on-failure
-ctest --test-dir .\build -C Debug -L optimizer --output-on-failure
-```
-
-## Source Layout
-
-The source tree is now grouped by responsibility:
-
-- `src/app`
-  Driver entry points and top-level orchestration.
-- `src/frontend`
-  `Lexer`, `Parser`, `Semantics`, `Token`, and `Ast`.
-- `src/backend`
-  target metadata and code generation.
-- `src/linker`
-  `minic-link`, linker backends, and PE/COFF linker implementation.
-- `src/support`
-  toolchain invocation and process helpers.
-
-## Notes
-
-This is intentionally a tiny compiler, not a full ISO C implementation.
-Current limits:
-
-- no general non-constant global initializers beyond function names, `&function`, `&global_object`, and string-literal pointer forms
-- no general aggregate initialization beyond the currently supported one-dimensional integer/pointer array subsets
-- no nested aggregate `struct` initialization or designated initializers yet
-- no by-value `struct` parameter passing or return yet on `x86_64-linux`
-- no general `struct` members containing arrays or nested structs in the current initializer/ABI subset
-- no full ISO C usual arithmetic conversions; integer compatibility follows the compiler's current widening rules
-- Linux executable linking depends on a working WSL distribution with `gcc`; this is a system-linker integration, not an in-process ELF linker
+## 测试覆盖
+
+128 个测试用例（119 通过，9 跳过 WSL/Linux 测试），覆盖：
+- 基础类型和运算
+- 控制流语句
+- 结构体/联合体/枚举
+- 指针和数组
+- 函数特性和调用约定
+- 预处理器
+- 优化器
+- 链接器（PE/COFF + ELF）
+- 错误诊断
+- 边界条件

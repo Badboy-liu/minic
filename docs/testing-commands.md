@@ -217,6 +217,72 @@ ctest --test-dir .\build -C Debug -R "^<test-name>$" --output-on-failure
 - `minic_linux_global_array_link`
 - `minic_linux_rejects_windows_obj`
 
+### 语言特性
+
+- `minic_char_literal`
+- `minic_comma_operator`
+- `minic_union_type`
+- `minic_const_qualifier`
+- `minic_unsigned_load`
+- `minic_const_assign_error`
+- `minic_variadic`
+- `minic_preprocessor_ops`
+- `minic_include_angle_bracket`
+- `minic_bool_type`
+- `minic_float`
+- `minic_goto_label`
+- `minic_type_cast`
+- `minic_switch_fallthrough`
+- `minic_line_directive`
+- `minic_modern_keywords`
+- `minic_static_local`
+- `minic_static_assert`
+- `minic_static_assert_fail`
+- `minic_static_assert_no_msg`
+- `minic_generic`
+- `minic_generic_simple`
+- `minic_alignof`
+- `minic_bitfield`
+- `minic_designated_init`
+- `minic_compound_literal`
+- `minic_vla`
+- `minic_anonymous_struct_member`
+- `minic_typedef`
+- `minic_enum`
+- `minic_compound_assign`
+- `minic_increment`
+- `minic_sizeof`
+- `minic_bitwise`
+- `minic_do_while`
+- `minic_ternary`
+
+### 优化器
+
+- `minic_constant_propagation`
+- `minic_dead_code_elimination`
+- `minic_loop_hoist`
+
+### 边界条件
+
+- `minic_edge_implicit_return`
+- `minic_edge_deep_nesting`
+- `minic_edge_multiple_returns`
+- `minic_edge_recursive`
+- `minic_edge_array_access`
+- `minic_edge_string_ops`
+- `minic_edge_nested_calls`
+- `minic_edge_while_break`
+- `minic_edge_nested_for`
+- `minic_edge_short_circuit`
+- `minic_edge_pointer_arithmetic`
+- `minic_edge_char_array`
+- `minic_edge_do_while_break`
+
+### 多维数组和柔性数组
+
+- `minic_multi_array_init`
+- `minic_flexible_array`
+
 ## Useful Command Patterns
 
 If you change only one module, use the matching label directly:

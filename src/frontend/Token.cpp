@@ -38,6 +38,60 @@ const char *tokenKindName(TokenKind kind) {
         return "break";
     case TokenKind::KeywordContinue:
         return "continue";
+    case TokenKind::KeywordDo:
+        return "do";
+    case TokenKind::KeywordSwitch:
+        return "switch";
+    case TokenKind::KeywordCase:
+        return "case";
+    case TokenKind::KeywordDefault:
+        return "default";
+    case TokenKind::KeywordUnsigned:
+        return "unsigned";
+    case TokenKind::KeywordSigned:
+        return "signed";
+    case TokenKind::KeywordTypedef:
+        return "typedef";
+    case TokenKind::KeywordEnum:
+        return "enum";
+    case TokenKind::KeywordUnion:
+        return "union";
+    case TokenKind::KeywordConst:
+        return "const";
+    case TokenKind::KeywordVolatile:
+        return "volatile";
+    case TokenKind::KeywordSizeof:
+        return "sizeof";
+    case TokenKind::KeywordGoto:
+        return "goto";
+    case TokenKind::KeywordFloat:
+        return "float";
+    case TokenKind::KeywordDouble:
+        return "double";
+    case TokenKind::KeywordStatic:
+        return "static";
+    case TokenKind::KeywordRestrict:
+        return "restrict";
+    case TokenKind::KeywordInline:
+        return "inline";
+    case TokenKind::KeywordNoreturn:
+        return "_Noreturn";
+    case TokenKind::KeywordAtomic:
+        return "_Atomic";
+    case TokenKind::KeywordAlignas:
+        return "_Alignas";
+    case TokenKind::KeywordThreadLocal:
+        return "_Thread_local";
+    case TokenKind::KeywordStaticAssert:
+        return "_Static_assert";
+    case TokenKind::KeywordGeneric:
+        return "_Generic";
+    case TokenKind::KeywordAlignof:
+        return "_Alignof";
+    case TokenKind::KeywordBool:
+        return "_Bool";
+    case TokenKind::FloatLiteral:
+        return "float literal";
     case TokenKind::LeftParen:
         return "(";
     case TokenKind::RightParen:
@@ -50,6 +104,8 @@ const char *tokenKindName(TokenKind kind) {
         return "[";
     case TokenKind::RightBracket:
         return "]";
+    case TokenKind::Colon:
+        return ":";
     case TokenKind::Dot:
         return ".";
     case TokenKind::Arrow:
@@ -88,6 +144,46 @@ const char *tokenKindName(TokenKind kind) {
         return ">";
     case TokenKind::GreaterEqual:
         return ">=";
+    case TokenKind::Percent:
+        return "%";
+    case TokenKind::LessLess:
+        return "<<";
+    case TokenKind::GreaterGreater:
+        return ">>";
+    case TokenKind::Caret:
+        return "^";
+    case TokenKind::Pipe:
+        return "|";
+    case TokenKind::Tilde:
+        return "~";
+    case TokenKind::PlusPlus:
+        return "++";
+    case TokenKind::MinusMinus:
+        return "--";
+    case TokenKind::PlusEqual:
+        return "+=";
+    case TokenKind::MinusEqual:
+        return "-=";
+    case TokenKind::StarEqual:
+        return "*=";
+    case TokenKind::SlashEqual:
+        return "/=";
+    case TokenKind::PercentEqual:
+        return "%=";
+    case TokenKind::LessLessEqual:
+        return "<<=";
+    case TokenKind::GreaterGreaterEqual:
+        return ">>=";
+    case TokenKind::AmpEqual:
+        return "&=";
+    case TokenKind::CaretEqual:
+        return "^=";
+    case TokenKind::PipeEqual:
+        return "|=";
+    case TokenKind::Question:
+        return "?";
+    case TokenKind::DotDotDot:
+        return "...";
     }
 
     return "unknown";

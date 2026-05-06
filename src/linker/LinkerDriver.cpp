@@ -74,7 +74,7 @@ LinkerDriver::Options LinkerDriver::parseOptions(const std::vector<std::string> 
 
 bool LinkerDriver::isObjectInput(const fs::path &path) {
     const std::string extension = path.extension().string();
-    return extension == ".obj" || extension == ".o";
+    return extension == ".obj" || extension == ".o" || extension == ".lib" || extension == ".a";
 }
 
 unsigned int LinkerDriver::sanitizeJobs(unsigned int requestedJobs) {
