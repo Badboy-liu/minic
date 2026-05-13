@@ -11,6 +11,7 @@ Lexer::Lexer(std::string_view sourceText, DiagnosticEngine *diag)
 
 std::vector<Token> Lexer::tokenize() {
     std::vector<Token> tokens;
+    tokens.reserve(std::max<size_t>(256, source.size() / 4));
 
     while (true) {
         skipWhitespaceAndComments();

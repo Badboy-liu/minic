@@ -1,5 +1,6 @@
 #include "Semantics.h"
 
+#include <climits>
 #include <stdexcept>
 
 namespace {
@@ -83,13 +84,16 @@ void SemanticAnalyzer::analyze(Program &program, bool requireMain) {
     }
 
     for (const auto &function : program.functions) {
-        globals.emplace(
-            function.name,
-            VariableSymbol{
-                Type::makeFunction(function.returnType, functions.at(function.name).parameterTypes, functions.at(function.name).isVariadic),
-                0,
-                true,
-                functionSymbol(function.name)});
+        auto it = functions.find(function.name);
+        if (it != functions.end()) {
+            globals.emplace(
+                function.name,
+                VariableSymbol{
+                    Type::makeFunction(function.returnType, it->second.parameterTypes, it->second.isVariadic),
+                    0,
+                    true,
+                    functionSymbol(function.name)});
+        }
     }
 
     for (auto &global : program.globals) {
@@ -492,693 +496,707 @@ void SemanticAnalyzer::analyzeBlock(BlockStmt &block) {
 }
 
 void SemanticAnalyzer::analyzeStatement(Stmt &stmt) {
-    switch (stmt.kind) {
-    case Stmt::Kind::Return: {
-        auto &returnStmt = static_cast<ReturnStmt &>(stmt);
-        if (currentReturnType->isVoid()) {
-            if (returnStmt.expr) {
-                fail("void function must not return a value");
-            }
-        } else {
-            if (!returnStmt.expr) {
-                fail("non-void function must return a value");
-            }
-            analyzeExpr(*returnStmt.expr);
-            if (currentReturnType->isStruct() && !isSupportedByValueStructType(currentReturnType)) {
-                fail("unsupported by-value struct return type: " + typeName(currentReturnType));
-            }
-            if (!canAssign(currentReturnType, returnStmt.expr->type)) {
-                fail("return type mismatch: expected " + typeName(currentReturnType) + ", got " + typeName(returnStmt.expr->type));
-            }
-            insertImplicitCast(returnStmt.expr, currentReturnType);
-        }
-        break;
-    }
-    case Stmt::Kind::Expr:
-        analyzeExpr(*static_cast<ExprStmt &>(stmt).expr);
-        break;
-    case Stmt::Kind::Decl: {
-        auto &decl = static_cast<DeclStmt &>(stmt);
-        if (decl.isStatic) {
-            // static 局部变量：存储在 .data/.bss 节，不占栈空间
-            auto &scope = scopes.back();
-            if (scope.find(decl.name) != scope.end()) {
-                fail("redeclaration of local variable: " + decl.name);
-            }
-            if (decl.type->isVoid()) {
-                fail("variable cannot have type void: " + decl.name);
-            }
-            if (decl.type->isFunction()) {
-                fail("variable cannot have function type: " + decl.name);
-            }
-            // 生成唯一符号名
-            static int staticLocalCounter = 0;
-            decl.staticSymbolName = "static_local_" + std::to_string(staticLocalCounter++) + "_" + decl.name;
-            // 注册为全局符号，以便 resolveVariable 能找到
-            globals[decl.name] = VariableSymbol{decl.type, 0, true, decl.staticSymbolName};
-            scope.emplace(decl.name, VariableSymbol{decl.type, 0, true, decl.staticSymbolName});
+    stmt.accept(*this);
+}
 
-            if (decl.init) {
-                analyzeExpr(*decl.init);
-                if (decl.type->isStruct()) {
-                    validateStructInitializer(decl.name, decl.type, *decl.init, true);
-                    break;
-                }
-                if (decl.type->isArray()) {
-                    validateArrayInitializer(decl.name, decl.type, *decl.init, true);
-                    break;
-                }
-                if (!canAssign(decl.type, decl.init->type)) {
-                    fail("cannot initialize " + decl.name + " of type " + typeName(decl.type) + " with " + typeName(decl.init->type));
-                }
-                insertImplicitCast(decl.init, decl.type);
+void SemanticAnalyzer::visitReturnStmt(ReturnStmt &node) {
+    if (currentReturnType->isVoid()) {
+        if (node.expr) {
+            fail("void function must not return a value");
+        }
+    } else {
+        if (!node.expr) {
+            fail("non-void function must return a value");
+        }
+        analyzeExpr(*node.expr);
+        if (currentReturnType->isStruct() && !isSupportedByValueStructType(currentReturnType)) {
+            fail("unsupported by-value struct return type: " + typeName(currentReturnType));
+        }
+        if (!canAssign(currentReturnType, node.expr->type)) {
+            fail("return type mismatch: expected " + typeName(currentReturnType) + ", got " + typeName(node.expr->type));
+        }
+        insertImplicitCast(node.expr, currentReturnType);
+    }
+}
+
+void SemanticAnalyzer::visitExprStmt(ExprStmt &node) {
+    analyzeExpr(*node.expr);
+}
+
+void SemanticAnalyzer::visitDeclStmt(DeclStmt &node) {
+    if (node.isStatic) {
+        auto &scope = scopes.back();
+        if (scope.find(node.name) != scope.end()) {
+            fail("redeclaration of local variable: " + node.name);
+        }
+        if (node.type->isVoid()) {
+            fail("variable cannot have type void: " + node.name);
+        }
+        if (node.type->isFunction()) {
+            fail("variable cannot have function type: " + node.name);
+        }
+        static int staticLocalCounter = 0;
+        node.staticSymbolName = "static_local_" + std::to_string(staticLocalCounter++) + "_" + node.name;
+        globals[node.name] = VariableSymbol{node.type, 0, true, node.staticSymbolName};
+        scope.emplace(node.name, VariableSymbol{node.type, 0, true, node.staticSymbolName});
+
+        if (node.init) {
+            analyzeExpr(*node.init);
+            if (node.type->isStruct()) {
+                validateStructInitializer(node.name, node.type, *node.init, true);
+                return;
             }
-            break;
-        }
-        declareVariable(decl);
-        if (decl.init) {
-            analyzeExpr(*decl.init);
-            if (decl.type->isStruct()) {
-                validateStructInitializer(decl.name, decl.type, *decl.init, false);
-                break;
+            if (node.type->isArray()) {
+                validateArrayInitializer(node.name, node.type, *node.init, true);
+                return;
             }
-            if (decl.type->isArray()) {
-                validateArrayInitializer(decl.name, decl.type, *decl.init, false);
-                break;
+            if (!canAssign(node.type, node.init->type)) {
+                fail("cannot initialize " + node.name + " of type " + typeName(node.type) + " with " + typeName(node.init->type));
             }
-            if (!canAssign(decl.type, decl.init->type)) {
-                fail("cannot initialize " + decl.name + " of type " + typeName(decl.type) + " with " + typeName(decl.init->type));
-            }
-            insertImplicitCast(decl.init, decl.type);
+            insertImplicitCast(node.init, node.type);
         }
-        break;
+        return;
     }
-    case Stmt::Kind::Block:
-        analyzeBlock(static_cast<BlockStmt &>(stmt));
-        break;
-    case Stmt::Kind::If: {
-        auto &ifStmt = static_cast<IfStmt &>(stmt);
-        analyzeExpr(*ifStmt.condition);
-        if (!ifStmt.condition->type->isScalar()) {
-            fail("if condition must be scalar");
+    declareVariable(node);
+    if (node.init) {
+        analyzeExpr(*node.init);
+        if (node.type->isStruct()) {
+            validateStructInitializer(node.name, node.type, *node.init, false);
+            return;
         }
-        analyzeStatement(*ifStmt.thenBranch);
-        if (ifStmt.elseBranch) {
-            analyzeStatement(*ifStmt.elseBranch);
+        if (node.type->isArray()) {
+            validateArrayInitializer(node.name, node.type, *node.init, false);
+            return;
         }
-        break;
+        if (!canAssign(node.type, node.init->type)) {
+            fail("cannot initialize " + node.name + " of type " + typeName(node.type) + " with " + typeName(node.init->type));
+        }
+        insertImplicitCast(node.init, node.type);
     }
-    case Stmt::Kind::While: {
-        auto &whileStmt = static_cast<WhileStmt &>(stmt);
-        analyzeExpr(*whileStmt.condition);
-        if (!whileStmt.condition->type->isScalar()) {
-            fail("while condition must be scalar");
-        }
-        ++loopDepth;
-        analyzeStatement(*whileStmt.body);
-        --loopDepth;
-        break;
+}
+
+void SemanticAnalyzer::visitBlockStmt(BlockStmt &node) {
+    analyzeBlock(node);
+}
+
+void SemanticAnalyzer::visitIfStmt(IfStmt &node) {
+    analyzeExpr(*node.condition);
+    if (!node.condition->type->isScalar()) {
+        fail("if condition must be scalar");
     }
-    case Stmt::Kind::For: {
-        auto &forStmt = static_cast<ForStmt &>(stmt);
-        enterScope();
-        if (forStmt.init) {
-            analyzeStatement(*forStmt.init);
-        }
-        if (forStmt.condition) {
-            analyzeExpr(*forStmt.condition);
-            if (!forStmt.condition->type->isScalar()) {
-                fail("for condition must be scalar");
-            }
-        }
-        if (forStmt.update) {
-            analyzeExpr(*forStmt.update);
-        }
-        ++loopDepth;
-        analyzeStatement(*forStmt.body);
-        --loopDepth;
-        leaveScope();
-        break;
+    analyzeStatement(*node.thenBranch);
+    if (node.elseBranch) {
+        analyzeStatement(*node.elseBranch);
     }
-    case Stmt::Kind::DoWhile: {
-        auto &doWhileStmt = static_cast<DoWhileStmt &>(stmt);
-        ++loopDepth;
-        analyzeStatement(*doWhileStmt.body);
-        analyzeExpr(*doWhileStmt.condition);
-        if (!doWhileStmt.condition->type->isScalar()) {
-            fail("do-while condition must be scalar");
-        }
-        --loopDepth;
-        break;
+}
+
+void SemanticAnalyzer::visitWhileStmt(WhileStmt &node) {
+    analyzeExpr(*node.condition);
+    if (!node.condition->type->isScalar()) {
+        fail("while condition must be scalar");
     }
-    case Stmt::Kind::Switch: {
-        auto &sw = static_cast<SwitchStmt &>(stmt);
-        analyzeExpr(*sw.scrutinee);
-        ++switchDepth;
-        for (auto &c : sw.cases) {
-            analyzeExpr(*c.label);
-            analyzeStatement(*c.body);
-        }
-        if (sw.defaultBody) {
-            analyzeStatement(*sw.defaultBody);
-        }
-        --switchDepth;
-        break;
+    ++loopDepth;
+    analyzeStatement(*node.body);
+    --loopDepth;
+}
+
+void SemanticAnalyzer::visitForStmt(ForStmt &node) {
+    enterScope();
+    if (node.init) {
+        analyzeStatement(*node.init);
     }
-    case Stmt::Kind::Break:
-        if (loopDepth == 0 && switchDepth == 0) {
-            fail("'break' used outside of a loop or switch");
+    if (node.condition) {
+        analyzeExpr(*node.condition);
+        if (!node.condition->type->isScalar()) {
+            fail("for condition must be scalar");
         }
-        break;
-    case Stmt::Kind::Continue:
-        if (loopDepth == 0) {
-            fail("'continue' used outside of a loop");
-        }
-        break;
-    case Stmt::Kind::Goto:
-        // goto 语句不做前向引用检查
-        break;
-    case Stmt::Kind::Label: {
-        auto &labelStmt = static_cast<LabelStmt &>(stmt);
-        analyzeStatement(*labelStmt.body);
-        break;
     }
-    case Stmt::Kind::StaticAssert: {
-        auto &assertStmt = static_cast<StaticAssertStmt &>(stmt);
-        analyzeExpr(*assertStmt.condition);
-        // 条件必须是编译时常量
-        long long condValue = 0;
-        if (!evaluateConstantExpr(*assertStmt.condition, condValue)) {
-            fail("_Static_assert condition must be a constant expression");
-        }
-        if (condValue == 0) {
-            // 无消息时提供默认诊断信息
-            std::string msg = assertStmt.message.empty()
-                ? "static assertion failed"
-                : assertStmt.message;
-            fail("_Static_assert failed: " + msg);
-        }
-        break;
+    if (node.update) {
+        analyzeExpr(*node.update);
     }
+    ++loopDepth;
+    analyzeStatement(*node.body);
+    --loopDepth;
+    leaveScope();
+}
+
+void SemanticAnalyzer::visitDoWhileStmt(DoWhileStmt &node) {
+    ++loopDepth;
+    analyzeStatement(*node.body);
+    analyzeExpr(*node.condition);
+    if (!node.condition->type->isScalar()) {
+        fail("do-while condition must be scalar");
+    }
+    --loopDepth;
+}
+
+void SemanticAnalyzer::visitSwitchStmt(SwitchStmt &node) {
+    analyzeExpr(*node.scrutinee);
+    ++switchDepth;
+    for (auto &c : node.cases) {
+        analyzeExpr(*c.label);
+        analyzeStatement(*c.body);
+    }
+    if (node.defaultBody) {
+        analyzeStatement(*node.defaultBody);
+    }
+    --switchDepth;
+}
+
+void SemanticAnalyzer::visitBreakStmt(BreakStmt &) {
+    if (loopDepth == 0 && switchDepth == 0) {
+        fail("'break' used outside of a loop or switch");
+    }
+}
+
+void SemanticAnalyzer::visitContinueStmt(ContinueStmt &) {
+    if (loopDepth == 0) {
+        fail("'continue' used outside of a loop");
+    }
+}
+
+void SemanticAnalyzer::visitGotoStmt(GotoStmt &) {
+    // goto 语句不做前向引用检查
+}
+
+void SemanticAnalyzer::visitLabelStmt(LabelStmt &node) {
+    analyzeStatement(*node.body);
+}
+
+void SemanticAnalyzer::visitStaticAssertStmt(StaticAssertStmt &node) {
+    analyzeExpr(*node.condition);
+    long long condValue = 0;
+    if (!evaluateConstantExpr(*node.condition, condValue)) {
+        fail("_Static_assert condition must be a constant expression");
+    }
+    if (condValue == 0) {
+        std::string msg = node.message.empty()
+            ? "static assertion failed"
+            : node.message;
+        fail("_Static_assert failed: " + msg);
     }
 }
 
 void SemanticAnalyzer::analyzeExpr(Expr &expr) {
-    switch (expr.kind) {
-    case Expr::Kind::Number:
-        expr.type = Type::makeInt();
-        expr.isLValue = false;
-        return;
-    case Expr::Kind::FloatLiteral:
-        expr.type = Type::makeDouble();
-        expr.isLValue = false;
-        return;
-    case Expr::Kind::String: {
-        auto &stringExpr = static_cast<StringExpr &>(expr);
-        expr.type = Type::makeArray(Type::makeChar(), static_cast<int>(stringExpr.value.size()) + 1);
-        expr.isLValue = false;
-        return;
+    expr.accept(*this);
+}
+
+void SemanticAnalyzer::visitNumberExpr(NumberExpr &node) {
+    node.type = Type::makeInt();
+    node.isLValue = false;
+}
+
+void SemanticAnalyzer::visitFloatLiteralExpr(FloatLiteralExpr &node) {
+    node.type = Type::makeDouble();
+    node.isLValue = false;
+}
+
+void SemanticAnalyzer::visitStringExpr(StringExpr &node) {
+    node.type = Type::makeArray(Type::makeChar(), static_cast<int>(node.value.size()) + 1);
+    node.isLValue = false;
+}
+
+void SemanticAnalyzer::visitVariableExpr(VariableExpr &node) {
+    const VariableSymbol symbol = resolveVariable(node.name, node.line, node.column);
+    node.stackOffset = symbol.stackOffset;
+    node.type = symbol.type;
+    node.isGlobal = symbol.isGlobal;
+    node.symbolName = symbol.symbolName;
+    node.isLValue = !symbol.type->isFunction();
+
+    if (!symbol.isGlobal && !usedVars.empty()) {
+        usedVars.back().insert(node.name);
     }
-    case Expr::Kind::Variable: {
-        auto &variable = static_cast<VariableExpr &>(expr);
-        const VariableSymbol symbol = resolveVariable(variable.name, expr.line, expr.column);
-        variable.stackOffset = symbol.stackOffset;
-        variable.type = symbol.type;
-        variable.isGlobal = symbol.isGlobal;
-        variable.symbolName = symbol.symbolName;
-        variable.isLValue = !symbol.type->isFunction();
-        expr.type = symbol.type;
-        expr.isLValue = !symbol.type->isFunction();
 
-        // 标记变量为已使用
-        if (!symbol.isGlobal && !usedVars.empty()) {
-            usedVars.back().insert(variable.name);
+    if (!symbol.isGlobal && !symbol.type->isFunction() && !initializedVars.empty()) {
+        bool isInitialized = false;
+        for (const auto &scope : initializedVars) {
+            if (scope.find(node.name) != scope.end()) {
+                isInitialized = true;
+                break;
+            }
         }
-
-        // 检查局部变量是否已初始化（全局变量和参数被视为已初始化）
-        if (!symbol.isGlobal && !symbol.type->isFunction() && !initializedVars.empty()) {
-            bool isInitialized = false;
-            for (const auto &scope : initializedVars) {
-                if (scope.find(variable.name) != scope.end()) {
+        if (!isInitialized && currentFunctionParameters) {
+            for (const auto &param : *currentFunctionParameters) {
+                if (param.name == node.name) {
                     isInitialized = true;
                     break;
                 }
             }
-            // 检查是否是函数参数
-            if (!isInitialized && currentFunctionParameters) {
-                for (const auto &param : *currentFunctionParameters) {
-                    if (param.name == variable.name) {
-                        isInitialized = true;
-                        break;
-                    }
-                }
-            }
-            if (!isInitialized) {
-                diag->warning(expr.line, expr.column, "use of uninitialized variable: " + variable.name);
-            }
         }
-        return;
+        if (!isInitialized) {
+            diag->warning(node.line, node.column, "use of uninitialized variable: " + node.name);
+        }
     }
-    case Expr::Kind::Unary: {
-        auto &unary = static_cast<UnaryExpr &>(expr);
-        if (unary.operand) {
-            analyzeExpr(*unary.operand);
-        }
-        switch (unary.op) {
-        case UnaryOp::Plus:
-        case UnaryOp::Minus:
-            if (!unary.operand->type->isInteger() && !unary.operand->type->isFloatingPoint()) {
-                fail("unary +/- requires int or float operand");
-            }
-            expr.type = unary.operand->type->isFloatingPoint()
-                ? unary.operand->type
-                : promoteIntegerType(unary.operand->type);
-            expr.isLValue = false;
-            return;
-        case UnaryOp::LogicalNot:
-            if (!unary.operand->type->isScalar()) {
-                fail("logical ! requires scalar operand");
-            }
-            expr.type = Type::makeInt();
-            expr.isLValue = false;
-            return;
-        case UnaryOp::AddressOf:
-            if (!unary.operand->isLValue && !unary.operand->type->isFunction()) {
-                fail("address-of requires an lvalue");
-            }
-            expr.type = Type::makePointer(unary.operand->type);
-            expr.isLValue = false;
-            return;
-        case UnaryOp::Dereference: {
-            TypePtr operandType = decayType(unary.operand->type);
-            if (!operandType->isPointer()) {
-                fail("dereference requires pointer operand");
-            }
-            expr.type = operandType->elementType;
-            expr.isLValue = !expr.type->isFunction();
-            return;
-        }
-        case UnaryOp::BitwiseNot:
-            if (!unary.operand->type->isInteger()) {
-                fail("bitwise ~ requires int operand");
-            }
-            expr.type = promoteIntegerType(unary.operand->type);
-            expr.isLValue = false;
-            return;
-        case UnaryOp::PreIncrement:
-        case UnaryOp::PreDecrement:
-        case UnaryOp::PostIncrement:
-        case UnaryOp::PostDecrement:
-            if (!unary.operand->isLValue) {
-                fail("increment/decrement requires an lvalue");
-            }
-            if (!unary.operand->type->isScalar()) {
-                fail("increment/decrement requires scalar operand");
-            }
-            expr.type = unary.operand->type;
-            expr.isLValue = false;
-            return;
-        case UnaryOp::Sizeof:
-            expr.type = Type::makeULong();
-            expr.isLValue = false;
-            return;
-        case UnaryOp::Alignof:
-            if (!unary.sizeofType) {
-                fail("_Alignof requires a type argument");
-            }
-            expr.type = Type::makeInt();
-            expr.isLValue = false;
-            return;
-        }
-        return;
-    }
-    case Expr::Kind::Binary: {
-        auto &binary = static_cast<BinaryExpr &>(expr);
-        analyzeExpr(*binary.left);
-        analyzeExpr(*binary.right);
-        TypePtr leftType = decayType(binary.left->type);
-        TypePtr rightType = decayType(binary.right->type);
+}
 
-        switch (binary.op) {
-        case BinaryOp::Add:
-            if (leftType->isPointer() && rightType->isInteger()) {
-                expr.type = leftType;
-            } else if (leftType->isInteger() && rightType->isPointer()) {
-                expr.type = rightType;
-            } else if (leftType->isScalar() && rightType->isScalar() && !(leftType->isPointer() || rightType->isPointer())) {
-                expr.type = usualArithmeticConversion(leftType, rightType);
-                insertImplicitCast(binary.left, expr.type);
-                insertImplicitCast(binary.right, expr.type);
-            } else {
-                fail("invalid operands to '+'");
-            }
-            expr.isLValue = false;
-            return;
-        case BinaryOp::Subtract:
-            if (leftType->isPointer() && rightType->isPointer()) {
-                // 指针减法：结果为 ptrdiff_t (long long)
-                expr.type = Type::makeLongLong();
-            } else if (leftType->isPointer() && rightType->isInteger()) {
-                expr.type = leftType;
-            } else if (leftType->isScalar() && rightType->isScalar() && !(leftType->isPointer() || rightType->isPointer())) {
-                expr.type = usualArithmeticConversion(leftType, rightType);
-                insertImplicitCast(binary.left, expr.type);
-                insertImplicitCast(binary.right, expr.type);
-            } else {
-                fail("invalid operands to '-'");
-            }
-            expr.isLValue = false;
-            return;
-        case BinaryOp::Multiply:
-        case BinaryOp::Divide:
-            if (leftType->isScalar() && rightType->isScalar() && !(leftType->isPointer() || rightType->isPointer())) {
-                expr.type = usualArithmeticConversion(leftType, rightType);
-                insertImplicitCast(binary.left, expr.type);
-                insertImplicitCast(binary.right, expr.type);
-            } else {
-                fail("arithmetic operator requires operands of the same type");
-            }
-            expr.isLValue = false;
-            return;
-        case BinaryOp::Equal:
-        case BinaryOp::NotEqual:
-            if (sameType(leftType, rightType)) {
-                // 类型相同，无需转换
-            } else if (leftType->isScalar() && rightType->isScalar() && !(leftType->isPointer() || rightType->isPointer())) {
-                // 混合 int/float 比较：应用常用算术转换
-                TypePtr convType = usualArithmeticConversion(leftType, rightType);
-                insertImplicitCast(binary.left, convType);
-                insertImplicitCast(binary.right, convType);
-            } else {
-                fail("incompatible operands to equality operator");
-            }
-            expr.type = Type::makeInt();
-            expr.isLValue = false;
-            return;
-        case BinaryOp::LogicalAnd:
-        case BinaryOp::LogicalOr:
-            if (!leftType->isScalar() || !rightType->isScalar()) {
-                fail("logical operator requires scalar operands");
-            }
-            expr.type = Type::makeInt();
-            expr.isLValue = false;
-            return;
-        case BinaryOp::Less:
-        case BinaryOp::LessEqual:
-        case BinaryOp::Greater:
-        case BinaryOp::GreaterEqual:
-            if (leftType->isScalar() && rightType->isScalar() && !(leftType->isPointer() || rightType->isPointer())) {
-                TypePtr convType = usualArithmeticConversion(leftType, rightType);
-                insertImplicitCast(binary.left, convType);
-                insertImplicitCast(binary.right, convType);
-            } else {
-                fail("comparison operator requires scalar operands");
-            }
-            expr.type = Type::makeInt();
-            expr.isLValue = false;
-            return;
-        case BinaryOp::Modulo:
-        case BinaryOp::ShiftLeft:
-        case BinaryOp::ShiftRight:
-        case BinaryOp::BitwiseAnd:
-        case BinaryOp::BitwiseXor:
-        case BinaryOp::BitwiseOr:
-            if (!leftType->isInteger() || !rightType->isInteger()) {
-                fail("bitwise operator requires int operands");
-            }
-            expr.type = commonIntegerType(leftType, rightType);
-            expr.isLValue = false;
-            return;
-        case BinaryOp::Comma:
-            // 逗号运算符：结果类型为右侧类型，isLValue 为右侧 isLValue
-            expr.type = binary.right->type;
-            expr.isLValue = binary.right->isLValue;
-            return;
+void SemanticAnalyzer::visitUnaryExpr(UnaryExpr &node) {
+    if (node.operand) {
+        analyzeExpr(*node.operand);
+    }
+    switch (node.op) {
+    case UnaryOp::Plus:
+    case UnaryOp::Minus:
+        if (!node.operand->type->isInteger() && !node.operand->type->isFloatingPoint()) {
+            fail("unary +/- requires int or float operand");
         }
+        node.type = node.operand->type->isFloatingPoint()
+            ? node.operand->type
+            : promoteIntegerType(node.operand->type);
+        node.isLValue = false;
+        return;
+    case UnaryOp::LogicalNot:
+        if (!node.operand->type->isScalar()) {
+            fail("logical ! requires scalar operand");
+        }
+        node.type = Type::makeInt();
+        node.isLValue = false;
+        return;
+    case UnaryOp::AddressOf:
+        if (!node.operand->isLValue && !node.operand->type->isFunction()) {
+            fail("address-of requires an lvalue");
+        }
+        node.type = Type::makePointer(node.operand->type);
+        node.isLValue = false;
+        return;
+    case UnaryOp::Dereference: {
+        TypePtr operandType = decayType(node.operand->type);
+        if (!operandType->isPointer()) {
+            fail("dereference requires pointer operand");
+        }
+        node.type = operandType->elementType;
+        node.isLValue = !node.type->isFunction();
         return;
     }
-    case Expr::Kind::InitializerList: {
-        auto &list = static_cast<InitializerListExpr &>(expr);
-        for (auto &element : list.elements) {
-            analyzeExpr(*element);
+    case UnaryOp::BitwiseNot:
+        if (!node.operand->type->isInteger()) {
+            fail("bitwise ~ requires int operand");
         }
-        expr.type = Type::makeVoid();
-        expr.isLValue = false;
+        node.type = promoteIntegerType(node.operand->type);
+        node.isLValue = false;
+        return;
+    case UnaryOp::PreIncrement:
+    case UnaryOp::PreDecrement:
+    case UnaryOp::PostIncrement:
+    case UnaryOp::PostDecrement:
+        if (!node.operand->isLValue) {
+            fail("increment/decrement requires an lvalue");
+        }
+        if (!node.operand->type->isScalar()) {
+            fail("increment/decrement requires scalar operand");
+        }
+        node.type = node.operand->type;
+        node.isLValue = false;
+        return;
+    case UnaryOp::Sizeof:
+        node.type = Type::makeULong();
+        node.isLValue = false;
+        return;
+    case UnaryOp::Alignof:
+        if (!node.sizeofType) {
+            fail("_Alignof requires a type argument");
+        }
+        node.type = Type::makeInt();
+        node.isLValue = false;
         return;
     }
-    case Expr::Kind::Assign: {
-        auto &assign = static_cast<AssignExpr &>(expr);
-        analyzeExpr(*assign.target);
-        analyzeExpr(*assign.value);
-        if (!assign.target->isLValue) {
-            fail("left-hand side of assignment must be an lvalue");
+}
+
+void SemanticAnalyzer::visitBinaryExpr(BinaryExpr &node) {
+    analyzeExpr(*node.left);
+    analyzeExpr(*node.right);
+    TypePtr leftType = decayType(node.left->type);
+    TypePtr rightType = decayType(node.right->type);
+
+    switch (node.op) {
+    case BinaryOp::Add:
+        if (leftType->isPointer() && rightType->isInteger()) {
+            node.type = leftType;
+        } else if (leftType->isInteger() && rightType->isPointer()) {
+            node.type = rightType;
+        } else if (leftType->isScalar() && rightType->isScalar() && !(leftType->isPointer() || rightType->isPointer())) {
+            node.type = usualArithmeticConversion(leftType, rightType);
+            insertImplicitCast(node.left, node.type);
+            insertImplicitCast(node.right, node.type);
+        } else {
+            fail("invalid operands to '+'");
         }
-        if (assign.target->type->isConst) {
-            fail("cannot assign to const variable");
-        }
-        if (assign.target->type->isArray() || assign.target->type->isVoid()) {
-            fail("left-hand side of assignment is not assignable");
-        }
-        if (!canAssign(assign.target->type, assign.value->type)) {
-            fail("assignment type mismatch: cannot assign " + typeName(assign.value->type) + " to " + typeName(assign.target->type));
-        }
-        // 赋值时插入隐式类型转换
-        insertImplicitCast(assign.value, assign.target->type);
-        // 标记变量为已初始化
-        if (assign.target->kind == Expr::Kind::Variable) {
-            const auto &varName = static_cast<const VariableExpr &>(*assign.target).name;
-            if (!initializedVars.empty()) {
-                initializedVars.back().insert(varName);
-            }
-        }
-        expr.type = assign.target->type;
-        expr.isLValue = false;
+        node.isLValue = false;
         return;
-    }
-    case Expr::Kind::Call: {
-        auto &call = static_cast<CallExpr &>(expr);
-        // 检测未声明函数调用（C99 起不允许隐式函数声明）
-        if (call.callee->kind == Expr::Kind::Variable) {
-            const auto &name = static_cast<const VariableExpr &>(*call.callee).name;
-            bool found = functions.find(name) != functions.end() || globals.find(name) != globals.end();
-            if (!found) {
-                for (const auto &scope : scopes) {
-                    if (scope.find(name) != scope.end()) { found = true; break; }
+    case BinaryOp::Subtract:
+        if (leftType->isPointer() && rightType->isPointer()) {
+            node.type = Type::makeLongLong();
+        } else if (leftType->isPointer() && rightType->isInteger()) {
+            node.type = leftType;
+        } else if (leftType->isScalar() && rightType->isScalar() && !(leftType->isPointer() || rightType->isPointer())) {
+            node.type = usualArithmeticConversion(leftType, rightType);
+            insertImplicitCast(node.left, node.type);
+            insertImplicitCast(node.right, node.type);
+        } else {
+            fail("invalid operands to '-'");
+        }
+        node.isLValue = false;
+        return;
+    case BinaryOp::Multiply:
+    case BinaryOp::Divide:
+        if (leftType->isScalar() && rightType->isScalar() && !(leftType->isPointer() || rightType->isPointer())) {
+            node.type = usualArithmeticConversion(leftType, rightType);
+            insertImplicitCast(node.left, node.type);
+            insertImplicitCast(node.right, node.type);
+            // 编译期除零检测
+            if (node.op == BinaryOp::Divide && diag) {
+                long long rhsVal = 0;
+                if (evaluateConstantExpr(*node.right, rhsVal) && rhsVal == 0) {
+                    diag->error(node.line, node.column, "division by zero");
                 }
             }
-            if (!found) {
-                failAt(call.callee->line, call.callee->column,
-                    "implicit declaration of function '" + name + "' is invalid in C99");
+        } else {
+            fail("arithmetic operator requires operands of the same type");
+        }
+        node.isLValue = false;
+        return;
+    case BinaryOp::Equal:
+    case BinaryOp::NotEqual:
+        if (sameType(leftType, rightType)) {
+        } else if (leftType->isScalar() && rightType->isScalar() && !(leftType->isPointer() || rightType->isPointer())) {
+            // 有符号/无符号比较警告
+            if (diag && leftType->isInteger() && rightType->isInteger() &&
+                leftType->isUnsigned != rightType->isUnsigned) {
+                diag->warning(node.line, node.column,
+                    "comparison of " + typeName(leftType) + " and " + typeName(rightType) +
+                    ": signed/unsigned comparison may behave unexpectedly");
+            }
+            TypePtr convType = usualArithmeticConversion(leftType, rightType);
+            insertImplicitCast(node.left, convType);
+            insertImplicitCast(node.right, convType);
+        } else {
+            fail("incompatible operands to equality operator");
+        }
+        node.type = Type::makeInt();
+        node.isLValue = false;
+        return;
+    case BinaryOp::LogicalAnd:
+    case BinaryOp::LogicalOr:
+        if (!leftType->isScalar() || !rightType->isScalar()) {
+            fail("logical operator requires scalar operands");
+        }
+        node.type = Type::makeInt();
+        node.isLValue = false;
+        return;
+    case BinaryOp::Less:
+    case BinaryOp::LessEqual:
+    case BinaryOp::Greater:
+    case BinaryOp::GreaterEqual:
+        if (leftType->isScalar() && rightType->isScalar() && !(leftType->isPointer() || rightType->isPointer())) {
+            // 有符号/无符号比较警告
+            if (diag && leftType->isInteger() && rightType->isInteger() &&
+                leftType->isUnsigned != rightType->isUnsigned) {
+                diag->warning(node.line, node.column,
+                    "comparison of " + typeName(leftType) + " and " + typeName(rightType) +
+                    ": signed/unsigned comparison may behave unexpectedly");
+            }
+            TypePtr convType = usualArithmeticConversion(leftType, rightType);
+            insertImplicitCast(node.left, convType);
+            insertImplicitCast(node.right, convType);
+        } else {
+            fail("comparison operator requires scalar operands");
+        }
+        node.type = Type::makeInt();
+        node.isLValue = false;
+        return;
+    case BinaryOp::Modulo:
+        if (!leftType->isInteger() || !rightType->isInteger()) {
+            fail("bitwise operator requires int operands");
+        }
+        node.type = commonIntegerType(leftType, rightType);
+        // 编译期取模零检测
+        if (diag) {
+            long long rhsVal = 0;
+            if (evaluateConstantExpr(*node.right, rhsVal) && rhsVal == 0) {
+                diag->error(node.line, node.column, "division by zero");
             }
         }
-        analyzeExpr(*call.callee);
-        TypePtr calleeType = decayType(call.callee->type);
-        TypePtr functionType;
-        if (calleeType->isFunction()) {
-            functionType = calleeType;
-        } else if (calleeType->isPointer() && calleeType->elementType->isFunction()) {
-            functionType = calleeType->elementType;
-        } else {
-            fail("call target must be a function or function pointer");
+        node.isLValue = false;
+        return;
+    case BinaryOp::ShiftLeft:
+    case BinaryOp::ShiftRight:
+    case BinaryOp::BitwiseAnd:
+    case BinaryOp::BitwiseXor:
+    case BinaryOp::BitwiseOr:
+        if (!leftType->isInteger() || !rightType->isInteger()) {
+            fail("bitwise operator requires int operands");
         }
-        if (functionType->isVariadic) {
-            // 可变参数函数：参数数量 >= 声明的参数数量
-            if (call.arguments.size() < functionType->parameterTypes.size()) {
+        node.type = commonIntegerType(leftType, rightType);
+        node.isLValue = false;
+        return;
+    case BinaryOp::Comma:
+        node.type = node.right->type;
+        node.isLValue = node.right->isLValue;
+        return;
+    }
+}
+
+void SemanticAnalyzer::visitInitializerListExpr(InitializerListExpr &node) {
+    for (auto &element : node.elements) {
+        analyzeExpr(*element);
+    }
+    node.type = Type::makeVoid();
+    node.isLValue = false;
+}
+
+void SemanticAnalyzer::visitAssignExpr(AssignExpr &node) {
+    analyzeExpr(*node.target);
+    analyzeExpr(*node.value);
+    if (!node.target->isLValue) {
+        fail("left-hand side of assignment must be an lvalue");
+    }
+    if (node.target->type->isConst) {
+        fail("cannot assign to const variable");
+    }
+    if (node.target->type->isArray() || node.target->type->isVoid()) {
+        fail("left-hand side of assignment is not assignable");
+    }
+    if (!canAssign(node.target->type, node.value->type)) {
+        fail("assignment type mismatch: cannot assign " + typeName(node.value->type) + " to " + typeName(node.target->type));
+    }
+    insertImplicitCast(node.value, node.target->type);
+    if (node.target->kind == Expr::Kind::Variable) {
+        const auto &varName = static_cast<const VariableExpr &>(*node.target).name;
+        if (!initializedVars.empty()) {
+            initializedVars.back().insert(varName);
+        }
+    }
+    node.type = node.target->type;
+    node.isLValue = false;
+}
+
+static int editDistance(const std::string &a, const std::string &b);
+
+void SemanticAnalyzer::visitCallExpr(CallExpr &node) {
+    if (node.callee->kind == Expr::Kind::Variable) {
+        const auto &name = static_cast<const VariableExpr &>(*node.callee).name;
+        bool found = functions.find(name) != functions.end() || globals.find(name) != globals.end();
+        if (!found) {
+            for (const auto &scope : scopes) {
+                if (scope.find(name) != scope.end()) { found = true; break; }
+            }
+        }
+        if (!found) {
+            // 查找相似的函数名
+            std::string suggestion;
+            int bestDist = 3;  // 最大编辑距离
+            for (const auto &fn : functions) {
+                int dist = editDistance(name, fn.first);
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    suggestion = fn.first;
+                }
+            }
+            std::string message = "implicit declaration of function '" + name + "' is invalid in C99";
+            if (!suggestion.empty()) {
+                message += "; did you mean '" + suggestion + "'?";
+            }
+            failAt(node.callee->line, node.callee->column, message);
+        }
+    }
+    analyzeExpr(*node.callee);
+    TypePtr calleeType = decayType(node.callee->type);
+    TypePtr functionType;
+    if (calleeType->isFunction()) {
+        functionType = calleeType;
+    } else if (calleeType->isPointer() && calleeType->elementType->isFunction()) {
+        functionType = calleeType->elementType;
+    } else {
+        fail("call target must be a function or function pointer");
+    }
+    if (functionType->isVariadic) {
+        if (node.arguments.size() < functionType->parameterTypes.size()) {
+            fail(
+                "wrong number of arguments in variadic function call: expected at least " +
+                std::to_string(functionType->parameterTypes.size()) + ", got " + std::to_string(node.arguments.size()));
+        }
+    } else {
+        if (node.arguments.size() != functionType->parameterTypes.size()) {
+            fail(
+                "wrong number of arguments in function call: expected " +
+                std::to_string(functionType->parameterTypes.size()) + ", got " + std::to_string(node.arguments.size()));
+        }
+    }
+    node.parameterTypes = functionType->parameterTypes;
+    for (std::size_t i = 0; i < node.arguments.size(); ++i) {
+        analyzeExpr(*node.arguments[i]);
+        if (i < functionType->parameterTypes.size()) {
+            if (!isEquivalentArgumentType(functionType->parameterTypes[i], node.arguments[i]->type)) {
                 fail(
-                    "wrong number of arguments in variadic function call: expected at least " +
-                    std::to_string(functionType->parameterTypes.size()) + ", got " + std::to_string(call.arguments.size()));
-            }
-        } else {
-            if (call.arguments.size() != functionType->parameterTypes.size()) {
-                fail(
-                    "wrong number of arguments in function call: expected " +
-                    std::to_string(functionType->parameterTypes.size()) + ", got " + std::to_string(call.arguments.size()));
+                    "argument type mismatch in function call: expected " +
+                    typeName(functionType->parameterTypes[i]) + ", got " + typeName(node.arguments[i]->type));
             }
         }
-        call.parameterTypes = functionType->parameterTypes;
-        for (std::size_t i = 0; i < call.arguments.size(); ++i) {
-            analyzeExpr(*call.arguments[i]);
-            if (i < functionType->parameterTypes.size()) {
-                if (!isEquivalentArgumentType(functionType->parameterTypes[i], call.arguments[i]->type)) {
-                    fail(
-                        "argument type mismatch in function call: expected " +
-                        typeName(functionType->parameterTypes[i]) + ", got " + typeName(call.arguments[i]->type));
-                }
-            }
-        }
-        expr.type = functionType->elementType;
-        expr.isLValue = false;
-        return;
     }
-    case Expr::Kind::Index: {
-        auto &index = static_cast<IndexExpr &>(expr);
-        analyzeExpr(*index.base);
-        analyzeExpr(*index.index);
-        if (!index.index->type->isInteger()) {
-            fail("array subscript must be int");
-        }
-        TypePtr baseType = decayType(index.base->type);
-        if (!baseType->isPointer()) {
-            fail("subscripted value must be pointer or array");
-        }
-        expr.type = baseType->elementType;
-        expr.isLValue = true;
-        return;
-    }
-    case Expr::Kind::MemberAccess: {
-        auto &member = static_cast<MemberAccessExpr &>(expr);
-        analyzeExpr(*member.base);
-        if (!member.base->type->isStruct()) {
-            fail("member access requires a struct value");
-        }
-        // 先尝试直接查找
-        const StructMember *resolved = member.base->type->findMember(member.memberName);
-        int resolvedOffset = 0;
-        if (resolved) {
-            resolvedOffset = resolved->offset;
-        } else {
-            // 直接查找失败，递归搜索匿名成员
-            int outOffset = 0;
-            resolved = member.base->type->findMemberRecursive(member.memberName, 0, outOffset);
-            if (!resolved) {
-                fail("unknown struct member: " + member.memberName);
-            }
-            resolvedOffset = outOffset;
-        }
-        member.memberOffset = resolvedOffset;
-        member.bitWidth = resolved->bitWidth;
-        member.bitOffset = resolved->bitOffset;
-        expr.type = resolved->type;
-        expr.isLValue = true;
-        return;
-    }
-    case Expr::Kind::Ternary: {
-        auto &ternary = static_cast<TernaryExpr &>(expr);
-        analyzeExpr(*ternary.condition);
-        if (!ternary.condition->type->isScalar()) {
-            fail("ternary condition must be scalar");
-        }
-        analyzeExpr(*ternary.thenExpr);
-        analyzeExpr(*ternary.elseExpr);
-        TypePtr thenType = decayType(ternary.thenExpr->type);
-        TypePtr elseType = decayType(ternary.elseExpr->type);
-        if (thenType->isScalar() && elseType->isScalar()) {
-            expr.type = usualArithmeticConversion(thenType, elseType);
-            insertImplicitCast(ternary.thenExpr, expr.type);
-            insertImplicitCast(ternary.elseExpr, expr.type);
-        } else {
-            expr.type = thenType;
-        }
-        expr.isLValue = false;
-        return;
-    }
-    case Expr::Kind::Cast: {
-        auto &cast = static_cast<CastExpr &>(expr);
-        analyzeExpr(*cast.operand);
-        // 类型转换：允许标量类型之间和指针之间的转换
-        expr.type = cast.targetType;
-        expr.isLValue = false;
-        return;
-    }
-    case Expr::Kind::BuiltinVaStart: {
-        auto &vaStart = static_cast<BuiltinVaStartExpr &>(expr);
-        analyzeExpr(*vaStart.ap);
-        if (!vaStart.ap->type->isPointer()) {
-            fail("__builtin_va_start: first argument must be a pointer");
-        }
-        // 查找最后一个命名参数的索引
-        if (currentFunctionParameters) {
-            for (int i = static_cast<int>(currentFunctionParameters->size()) - 1; i >= 0; --i) {
-                if ((*currentFunctionParameters)[i].name == vaStart.lastParamName) {
-                    vaStart.paramIndex = i;
-                    break;
-                }
-            }
-            if (vaStart.paramIndex < 0) {
-                fail("__builtin_va_start: unknown parameter name: " + vaStart.lastParamName);
-            }
-        }
-        expr.type = Type::makeVoid();
-        expr.isLValue = false;
-        return;
-    }
-    case Expr::Kind::BuiltinVaArg: {
-        auto &vaArg = static_cast<BuiltinVaArgExpr &>(expr);
-        analyzeExpr(*vaArg.ap);
-        if (!vaArg.ap->type->isPointer()) {
-            fail("__builtin_va_arg: first argument must be a pointer");
-        }
-        expr.type = vaArg.argType;
-        expr.isLValue = false;
-        return;
-    }
-    case Expr::Kind::BuiltinVaEnd: {
-        auto &vaEnd = static_cast<BuiltinVaEndExpr &>(expr);
-        analyzeExpr(*vaEnd.ap);
-        if (!vaEnd.ap->type->isPointer()) {
-            fail("__builtin_va_end: argument must be a pointer");
-        }
-        expr.type = Type::makeVoid();
-        expr.isLValue = false;
-        return;
-    }
-    case Expr::Kind::Generic: {
-        auto &generic = static_cast<GenericExpr &>(expr);
-        analyzeExpr(*generic.controllingExpr);
-        // 对控制表达式类型做 decay（数组→指针，函数→指针）
-        TypePtr ctrlType = decayType(generic.controllingExpr->type);
+    node.type = functionType->elementType;
+    node.isLValue = false;
+}
 
-        // 分析所有 association 表达式
-        for (auto &assoc : generic.associations) {
-            analyzeExpr(*assoc.expr);
-        }
-
-        // 查找匹配的 association（对 association 类型也做 decay）
-        for (auto &assoc : generic.associations) {
-            if (!assoc.type) {
-                continue;
-            }
-            TypePtr assocType = decayType(assoc.type);
-            if (sameType(ctrlType, assocType)) {
-                expr.type = assoc.expr->type;
-                expr.isLValue = assoc.expr->isLValue;
-                generic.selectedExpr = assoc.expr.get();
-                return;
-            }
-        }
-
-        // 使用 default
-        for (auto &assoc : generic.associations) {
-            if (!assoc.type) {
-                expr.type = assoc.expr->type;
-                expr.isLValue = assoc.expr->isLValue;
-                generic.selectedExpr = assoc.expr.get();
-                return;
-            }
-        }
-
-        fail("_Generic: no matching association for type " + typeName(ctrlType));
+void SemanticAnalyzer::visitIndexExpr(IndexExpr &node) {
+    analyzeExpr(*node.base);
+    analyzeExpr(*node.index);
+    if (!node.index->type->isInteger()) {
+        fail("array subscript must be int");
     }
-    case Expr::Kind::CompoundLiteral: {
-        auto &compound = static_cast<CompoundLiteralExpr &>(expr);
-        // 分析初始化列表中的元素
-        for (auto &element : compound.init->elements) {
-            analyzeExpr(*element);
-        }
-        // 复合字面量的类型就是指定的类型
-        expr.type = compound.compoundType;
-        // 复合字面量是左值（可以取地址）
-        expr.isLValue = true;
-        // 为复合字面量分配栈空间
-        int clSize = compound.compoundType->valueSize();
-        if (clSize == 0 && compound.compoundType->isArray() && compound.init) {
-            clSize = static_cast<int>(compound.init->elements.size()) * compound.compoundType->elementType->valueSize();
-        }
-        nextStackOffset = alignTo(nextStackOffset, compound.compoundType->alignment());
-        nextStackOffset += clSize;
-        compound.stackOffset = nextStackOffset;
-        return;
+    TypePtr baseType = decayType(node.base->type);
+    if (!baseType->isPointer()) {
+        fail("subscripted value must be pointer or array");
     }
+    node.type = baseType->elementType;
+    node.isLValue = true;
+}
+
+void SemanticAnalyzer::visitMemberAccessExpr(MemberAccessExpr &node) {
+    analyzeExpr(*node.base);
+    if (!node.base->type->isStruct()) {
+        fail("member access requires a struct value");
+    }
+    const StructMember *resolved = node.base->type->findMember(node.memberName);
+    int resolvedOffset = 0;
+    if (resolved) {
+        resolvedOffset = resolved->offset;
+    } else {
+        int outOffset = 0;
+        resolved = node.base->type->findMemberRecursive(node.memberName, 0, outOffset);
+        if (!resolved) {
+            fail("unknown struct member: " + node.memberName);
+        }
+        resolvedOffset = outOffset;
+    }
+    node.memberOffset = resolvedOffset;
+    node.bitWidth = resolved->bitWidth;
+    node.bitOffset = resolved->bitOffset;
+    node.type = resolved->type;
+    node.isLValue = true;
+}
+
+void SemanticAnalyzer::visitTernaryExpr(TernaryExpr &node) {
+    analyzeExpr(*node.condition);
+    if (!node.condition->type->isScalar()) {
+        fail("ternary condition must be scalar");
+    }
+    analyzeExpr(*node.thenExpr);
+    analyzeExpr(*node.elseExpr);
+    TypePtr thenType = decayType(node.thenExpr->type);
+    TypePtr elseType = decayType(node.elseExpr->type);
+    if (thenType->isScalar() && elseType->isScalar()) {
+        node.type = usualArithmeticConversion(thenType, elseType);
+        insertImplicitCast(node.thenExpr, node.type);
+        insertImplicitCast(node.elseExpr, node.type);
+    } else {
+        node.type = thenType;
+    }
+    node.isLValue = false;
+}
+
+void SemanticAnalyzer::visitCastExpr(CastExpr &node) {
+    analyzeExpr(*node.operand);
+    node.type = node.targetType;
+    node.isLValue = false;
+}
+
+void SemanticAnalyzer::visitBuiltinVaStartExpr(BuiltinVaStartExpr &node) {
+    analyzeExpr(*node.ap);
+    if (!node.ap->type->isPointer()) {
+        fail("__builtin_va_start: first argument must be a pointer");
+    }
+    if (currentFunctionParameters) {
+        for (int i = static_cast<int>(currentFunctionParameters->size()) - 1; i >= 0; --i) {
+            if ((*currentFunctionParameters)[i].name == node.lastParamName) {
+                node.paramIndex = i;
+                break;
+            }
+        }
+        if (node.paramIndex < 0) {
+            fail("__builtin_va_start: unknown parameter name: " + node.lastParamName);
+        }
+    }
+    node.type = Type::makeVoid();
+    node.isLValue = false;
+}
+
+void SemanticAnalyzer::visitBuiltinVaArgExpr(BuiltinVaArgExpr &node) {
+    analyzeExpr(*node.ap);
+    if (!node.ap->type->isPointer()) {
+        fail("__builtin_va_arg: first argument must be a pointer");
+    }
+    node.type = node.argType;
+    node.isLValue = false;
+}
+
+void SemanticAnalyzer::visitBuiltinVaEndExpr(BuiltinVaEndExpr &node) {
+    analyzeExpr(*node.ap);
+    if (!node.ap->type->isPointer()) {
+        fail("__builtin_va_end: argument must be a pointer");
+    }
+    node.type = Type::makeVoid();
+    node.isLValue = false;
+}
+
+void SemanticAnalyzer::visitGenericExpr(GenericExpr &node) {
+    analyzeExpr(*node.controllingExpr);
+    TypePtr ctrlType = decayType(node.controllingExpr->type);
+
+    for (auto &assoc : node.associations) {
+        analyzeExpr(*assoc.expr);
+    }
+
+    for (auto &assoc : node.associations) {
+        if (!assoc.type) {
+            continue;
+        }
+        TypePtr assocType = decayType(assoc.type);
+        if (sameType(ctrlType, assocType)) {
+            node.type = assoc.expr->type;
+            node.isLValue = assoc.expr->isLValue;
+            node.selectedExpr = assoc.expr.get();
+            return;
+        }
+    }
+
+    for (auto &assoc : node.associations) {
+        if (!assoc.type) {
+            node.type = assoc.expr->type;
+            node.isLValue = assoc.expr->isLValue;
+            node.selectedExpr = assoc.expr.get();
+            return;
+        }
+    }
+
+    fail("_Generic: no matching association for type " + typeName(ctrlType));
+}
+
+void SemanticAnalyzer::visitCompoundLiteralExpr(CompoundLiteralExpr &node) {
+    for (auto &element : node.init->elements) {
+        analyzeExpr(*element);
+    }
+    node.type = node.compoundType;
+    node.isLValue = true;
+    int clSize = node.compoundType->valueSize();
+    if (clSize == 0 && node.compoundType->isArray() && node.init) {
+        clSize = static_cast<int>(node.init->elements.size()) * node.compoundType->elementType->valueSize();
+    }
+    nextStackOffset = alignTo(nextStackOffset, node.compoundType->alignment());
+    nextStackOffset += clSize;
+    node.stackOffset = nextStackOffset;
+}
+
+void SemanticAnalyzer::visitStmtExpr(StmtExpr &node) {
+    for (auto &stmt : node.statements) {
+        analyzeStatement(*stmt);
+    }
+    if (node.result) {
+        analyzeExpr(*node.result);
+        node.type = node.result->type;
+        node.isLValue = node.result->isLValue;
+    } else {
+        node.type = Type::makeVoid();
+        node.isLValue = false;
     }
 }
 
@@ -1277,21 +1295,23 @@ void SemanticAnalyzer::declareVariable(DeclStmt &decl) {
 static int editDistance(const std::string &a, const std::string &b) {
     const int m = static_cast<int>(a.size());
     const int n = static_cast<int>(b.size());
-    std::vector<std::vector<int>> dp(m + 1, std::vector<int>(n + 1));
 
-    for (int i = 0; i <= m; ++i) dp[i][0] = i;
-    for (int j = 0; j <= n; ++j) dp[0][j] = j;
+    // 使用两个一维行代替二维矩阵，减少堆分配
+    std::vector<int> prev(n + 1), curr(n + 1);
+    for (int j = 0; j <= n; ++j) prev[j] = j;
 
     for (int i = 1; i <= m; ++i) {
+        curr[0] = i;
         for (int j = 1; j <= n; ++j) {
             if (a[i - 1] == b[j - 1]) {
-                dp[i][j] = dp[i - 1][j - 1];
+                curr[j] = prev[j - 1];
             } else {
-                dp[i][j] = 1 + std::min({dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]});
+                curr[j] = 1 + std::min({prev[j], curr[j - 1], prev[j - 1]});
             }
         }
+        std::swap(prev, curr);
     }
-    return dp[m][n];
+    return prev[n];
 }
 
 // 查找最相似的名称
@@ -1654,15 +1674,50 @@ bool SemanticAnalyzer::evaluateConstantExpr(const Expr &expr, long long &result)
             return false;
         }
         switch (binary.op) {
-        case BinaryOp::Add: result = leftVal + rightVal; return true;
-        case BinaryOp::Subtract: result = leftVal - rightVal; return true;
-        case BinaryOp::Multiply: result = leftVal * rightVal; return true;
+        case BinaryOp::Add: {
+            long long wide = leftVal + rightVal;
+            if ((wide > INT32_MAX || wide < INT32_MIN) && diag) {
+                diag->warning(binary.line, binary.column, "signed integer overflow in constant expression");
+            }
+            result = wide;
+            return true;
+        }
+        case BinaryOp::Subtract: {
+            long long wide = leftVal - rightVal;
+            if ((wide > INT32_MAX || wide < INT32_MIN) && diag) {
+                diag->warning(binary.line, binary.column, "signed integer overflow in constant expression");
+            }
+            result = wide;
+            return true;
+        }
+        case BinaryOp::Multiply: {
+            long long wide = leftVal * rightVal;
+            if ((wide > INT32_MAX || wide < INT32_MIN) && diag) {
+                diag->warning(binary.line, binary.column, "signed integer overflow in constant expression");
+            }
+            result = wide;
+            return true;
+        }
         case BinaryOp::Divide:
-            if (rightVal == 0) return false;
+            if (rightVal == 0) {
+                if (diag) diag->error(binary.line, binary.column, "division by zero in constant expression");
+                return false;
+            }
+            if (leftVal == INT_MIN && rightVal == -1) {
+                if (diag) diag->error(binary.line, binary.column, "signed integer overflow in constant expression (INT_MIN / -1)");
+                return false;
+            }
             result = leftVal / rightVal;
             return true;
         case BinaryOp::Modulo:
-            if (rightVal == 0) return false;
+            if (rightVal == 0) {
+                if (diag) diag->error(binary.line, binary.column, "division by zero in constant expression");
+                return false;
+            }
+            if (leftVal == INT_MIN && rightVal == -1) {
+                if (diag) diag->error(binary.line, binary.column, "signed integer overflow in constant expression (INT_MIN % -1)");
+                return false;
+            }
             result = leftVal % rightVal;
             return true;
         case BinaryOp::Equal: result = leftVal == rightVal; return true;
@@ -1676,8 +1731,18 @@ bool SemanticAnalyzer::evaluateConstantExpr(const Expr &expr, long long &result)
         case BinaryOp::BitwiseAnd: result = leftVal & rightVal; return true;
         case BinaryOp::BitwiseXor: result = leftVal ^ rightVal; return true;
         case BinaryOp::BitwiseOr: result = leftVal | rightVal; return true;
-        case BinaryOp::ShiftLeft: result = leftVal << rightVal; return true;
-        case BinaryOp::ShiftRight: result = leftVal >> rightVal; return true;
+        case BinaryOp::ShiftLeft:
+            if (rightVal < 0 || rightVal >= 32) {
+                if (diag) diag->warning(binary.line, binary.column, "shift amount out of range in constant expression");
+            }
+            result = leftVal << rightVal;
+            return true;
+        case BinaryOp::ShiftRight:
+            if (rightVal < 0 || rightVal >= 32) {
+                if (diag) diag->warning(binary.line, binary.column, "shift amount out of range in constant expression");
+            }
+            result = leftVal >> rightVal;
+            return true;
         default: return false;
         }
     }

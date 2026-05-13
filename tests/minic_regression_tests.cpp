@@ -97,7 +97,7 @@ std::vector<CompilerRegressionCase> compilerCases() {
             {"symbol gv_value", "symbol fn_read_global_through_abs", "section=.text", "type=ADDR64"}},
         {"minic_duplicate_external_symbol", {"input/tmp_link_duplicate_main.c", "input/tmp_link_duplicate_one.asm", "input/tmp_link_duplicate_two.asm"}, {"--link-trace"}, "build/output/tmp_link_duplicate.exe", 0, {}, {}, {"duplicate external symbol: fn_dupe"}, "", {}, "", "", {}, true},
         {"minic_unsupported_text_relocation", {"input/tmp_link_bad_reloc_main.c", "input/tmp_link_bad_reloc_helper.asm"}, {"--link-trace"}, "build/output/tmp_link_bad_reloc.exe", 0, {}, {}, {"unsupported COFF", "section .text"}, "", {}, "", "", {}, true},
-        {"minic_unsupported_target_section", {"input/tmp_link_bad_section_main.c", "input/tmp_link_bad_section_helper.asm"}, {"--link-trace"}, "build/output/tmp_link_bad_section.exe", 0, {}, {}, {"linker diagnostic:", ".pdata"}, "", {}, "", "", {}, true},
+        {"minic_unsupported_target_section", {"input/tmp_link_bad_section_main.c", "input/tmp_link_bad_section_helper.asm"}, {"--link-trace"}, "build/output/tmp_link_bad_section.exe", 0, {}, {}, {"linker diagnostic:", ".badsec"}, "", {}, "", "", {}, true},
         {"minic_function_ptr_global", {"input/tmp_function_ptr_global.c"}, {"--link-trace"}, "build/output/tmp_function_ptr_global.exe", 42,
             {"[link] input objects", "[link] merged sections", "[link] resolved symbols", "[link] relocations"},
             {"symbol gv_fn_ptr", "symbol fn_answer", "section=.data", "type=ADDR64"}},
@@ -156,6 +156,9 @@ std::vector<CompilerRegressionCase> compilerCases() {
         {"minic_static_local", {"input/tmp_static_local.c"}, {}, "build/output/tmp_static_local.exe", 42},
         {"minic_static_assert", {"input/tmp_static_assert.c"}, {}, "build/output/tmp_static_assert.exe", 42},
         {"minic_static_assert_fail", {"input/tmp_static_assert_fail.c"}, {}, "build/output/tmp_static_assert_fail.exe", 0, {}, {}, {"_Static_assert failed"}, "", {}, "", "", {}, true},
+        {"minic_error_recovery", {"input/tmp_error_recovery.c"}, {}, "build/output/tmp_error_recovery.exe", 0, {}, {}, {"expected expression"}, "", {}, "", "", {}, true},
+        {"minic_optimizer", {"input/tmp_optimizer.c"}, {}, "build/output/tmp_optimizer.exe", 42},
+        {"minic_loop_unroll", {"input/tmp_loop_unroll.c"}, {}, "build/output/tmp_loop_unroll.exe", 42},
         {"minic_generic", {"input/tmp_generic.c"}, {}, "build/output/tmp_generic.exe", 42},
         {"minic_alignof", {"input/tmp_alignof.c"}, {}, "build/output/tmp_alignof.exe", 42},
         {"minic_bitfield", {"input/tmp_bitfield.c"}, {}, "build/output/tmp_bitfield.exe", 60},
@@ -192,7 +195,29 @@ std::vector<CompilerRegressionCase> compilerCases() {
         {"minic_edge_do_while_break", {"input/tmp_edge_do_while_break.c"}, {}, "build/output/tmp_edge_do_while_break.exe", 42},
         {"minic_inline_functions", {"input/tmp_inline_multi.c"}, {}, "build/output/tmp_inline_multi.exe", 42},
         {"minic_int_suffix", {"input/tmp_int_suffix.c"}, {}, "build/output/tmp_int_suffix.exe", 0},
-        {"minic_wstring", {"input/tmp_wstring.c"}, {}, "build/output/tmp_wstring.exe", 42}
+        {"minic_wstring", {"input/tmp_wstring.c"}, {}, "build/output/tmp_wstring.exe", 42},
+
+        // --ir 流水线测试
+        {"minic_ir_answer", {"input/answer.c"}, {"--ir", "-o", "build/output/ir_answer.exe"}, "build/output/ir_answer.exe", 42},
+        {"minic_ir_while_break", {"input/tmp_edge_while_break.c"}, {"--ir", "-o", "build/output/ir_edge_while_break.exe"}, "build/output/ir_edge_while_break.exe", 15},
+        {"minic_ir_nested_for", {"input/tmp_edge_nested_for.c"}, {"--ir", "-o", "build/output/ir_edge_nested_for.exe"}, "build/output/ir_edge_nested_for.exe", 30},
+        {"minic_ir_do_while", {"input/tmp_do_while.c"}, {"--ir", "-o", "build/output/ir_do_while.exe"}, "build/output/ir_do_while.exe", 55},
+        {"minic_ir_goto", {"input/tmp_goto.c"}, {"--ir", "-o", "build/output/ir_goto.exe"}, "build/output/ir_goto.exe", 42},
+        {"minic_ir_switch", {"input/tmp_switch_fallthrough.c"}, {"--ir", "-o", "build/output/ir_switch.exe"}, "build/output/ir_switch.exe", 42},
+        {"minic_ir_recursive", {"input/tmp_edge_recursive.c"}, {"--ir", "-o", "build/output/ir_edge_recursive.exe"}, "build/output/ir_edge_recursive.exe", 120},
+        {"minic_ir_const_prop", {"input/tmp_const_prop.c"}, {"--ir", "-o", "build/output/ir_const_prop.exe"}, "build/output/ir_const_prop.exe", 46},
+        {"minic_ir_dead_code", {"input/tmp_dead_code.c"}, {"--ir", "-o", "build/output/ir_dead_code.exe"}, "build/output/ir_dead_code.exe", 42},
+        {"minic_ir_loop_hoist", {"input/tmp_loop_hoist.c"}, {"--ir", "-o", "build/output/ir_loop_hoist.exe"}, "build/output/ir_loop_hoist.exe", 150},
+        {"minic_ir_short_circuit", {"input/tmp_edge_short_circuit.c"}, {"--ir", "-o", "build/output/ir_edge_short_circuit.exe"}, "build/output/ir_edge_short_circuit.exe", 42},
+        {"minic_ir_pointer_arithmetic", {"input/tmp_edge_pointer_arithmetic.c"}, {"--ir", "-o", "build/output/ir_edge_pointer_arithmetic.exe"}, "build/output/ir_edge_pointer_arithmetic.exe", 42},
+        {"minic_ir_multiple_returns", {"input/tmp_edge_multiple_returns.c"}, {"--ir", "-o", "build/output/ir_edge_multiple_returns.exe"}, "build/output/ir_edge_multiple_returns.exe", 8},
+        {"minic_ir_array_access", {"input/tmp_edge_array_access.c"}, {"--ir", "-o", "build/output/ir_edge_array_access.exe"}, "build/output/ir_edge_array_access.exe", 50},
+        {"minic_ir_deep_nesting", {"input/tmp_edge_deep_nesting.c"}, {"--ir", "-o", "build/output/ir_edge_deep_nesting.exe"}, "build/output/ir_edge_deep_nesting.exe", 108},
+        {"minic_ir_nested_calls", {"input/tmp_edge_nested_calls.c"}, {"--ir", "-o", "build/output/ir_edge_nested_calls.exe"}, "build/output/ir_edge_nested_calls.exe", 26},
+        {"minic_ir_compound_assign", {"input/tmp_compound_assign.c"}, {"--ir", "-o", "build/output/ir_compound_assign.exe"}, "build/output/ir_compound_assign.exe", 0},
+        {"minic_ir_increment", {"input/tmp_increment.c"}, {"--ir", "-o", "build/output/ir_increment.exe"}, "build/output/ir_increment.exe", 0},
+        {"minic_ir_bitwise", {"input/tmp_bitwise.c"}, {"--ir", "-o", "build/output/ir_bitwise.exe"}, "build/output/ir_bitwise.exe", 0},
+        {"minic_ir_do_while_break", {"input/tmp_edge_do_while_break.c"}, {"--ir", "-o", "build/output/ir_edge_do_while_break.exe"}, "build/output/ir_edge_do_while_break.exe", 42}
     };
 }
 

@@ -1,6 +1,15 @@
 #include "Driver.h"
 
 #include "CodeGenerator.h"
+#include "ir/IRLowering.h"
+#include "ir/IRCodeGenerator.h"
+#include "ir/SSAConstructor.h"
+#include "ir/passes/IRPassManager.h"
+#include "ir/passes/IRConstProp.h"
+#include "ir/passes/IRDeadCodeElim.h"
+#include "ir/passes/IRCopyProp.h"
+#include "ir/passes/IRStrengthReduction.h"
+#include "ir/passes/IRLICM.h"
 #include "Diagnostics.h"
 #include "Lexer.h"
 #include "Optimizer.h"
@@ -75,6 +84,7 @@ struct PreparedTranslationUnit {
     Program program;
     fs::path asmPath;
     fs::path objPath;
+    std::string sourceFileName;
     bool emitEntryPoint = false;
 };
 
@@ -340,6 +350,7 @@ int Driver::run(const fs::path &selfPath, const std::vector<std::string> &args) 
         unit.asmPath = asmPath;
         unit.objPath = objPath;
         unit.emitEntryPoint = emitEntryPoint;
+        unit.sourceFileName = sourceInputs[i].filename().string();
         preparedUnits.push_back(std::move(unit));
     }
 
@@ -347,8 +358,48 @@ int Driver::run(const fs::path &selfPath, const std::vector<std::string> &args) 
         runParallelTasks<GeneratedTranslationUnit>(preparedUnits.size(), requestedJobs, [&](std::size_t index) {
             return [&, index]() mutable {
                 PreparedTranslationUnit unit = std::move(preparedUnits[index]);
-                CodeGenerator generator(options.target);
-                const std::string assembly = generator.generate(unit.program, unit.emitEntryPoint);
+                std::string assembly;
+                if (options.useIR) {
+                    // SSA IR 流水线：AST → IR → SSA → 优化 → x64
+                    std::cerr << "[Pipeline] lowering..." << std::endl;
+                    ir::IRLowering lowering;
+                    auto irModule = lowering.lowerProgram(unit.program);
+                    auto constPool = irModule->getConstantPool();
+                    ir::SSAConstructor ssa;
+                    for (auto &fn : irModule->functions) {
+                        fn->rebuildUseLists(constPool);
+                        ssa.run(*fn, constPool);
+                        constPool = irModule->getConstantPool();
+                        fn->rebuildUseLists(constPool);
+                    }
+                    std::cerr << "[Pipeline] optimization passes..." << std::endl;
+                    // 优化 pass
+                    {
+                        ir::IRPassManager passMgr;
+                        passMgr.addPass(std::make_unique<ir::IRConstProp>());
+                        passMgr.addPass(std::make_unique<ir::IRDeadCodeElim>());
+                        passMgr.addPass(std::make_unique<ir::IRCopyProp>());
+                        passMgr.addPass(std::make_unique<ir::IRStrengthReduction>());
+                        passMgr.addPass(std::make_unique<ir::IRLICM>());
+                        for (auto &fn : irModule->functions) {
+                            constPool = irModule->getConstantPool();
+                            fn->rebuildUseLists(constPool);
+                            std::cerr << "[Pipeline] runToFixpoint: " << fn->name << std::endl;
+                            passMgr.runToFixpoint(*fn, *irModule);
+                            constPool = irModule->getConstantPool();
+                            fn->rebuildUseLists(constPool);
+                        }
+                    }
+                    std::cerr << "[Pipeline] code generation..." << std::endl;
+                    ir::IRCodeGenerator irCodeGen;
+                    assembly = irCodeGen.generate(*irModule);
+                    std::cerr << "[Pipeline] done." << std::endl;
+                } else {
+                    // 传统流水线：AST → x64
+                    CodeGenerator generator(options.target);
+                    generator.setSourceFileName(unit.sourceFileName);
+                    assembly = generator.generate(unit.program, unit.emitEntryPoint);
+                }
                 writeFile(unit.asmPath, assembly);
 
                 GeneratedTranslationUnit generated;
@@ -552,6 +603,8 @@ Driver::Options Driver::parseOptions(const std::vector<std::string> &rawArgs) co
                 throw std::runtime_error("missing target name after --target");
             }
             options.target = parseTargetName(args[++i]);
+        } else if (args[i] == "--ir") {
+            options.useIR = true;
         } else if (args[i].rfind("-O", 0) == 0 && args[i].size() == 3) {
             char level = args[i][2];
             if (level < '0' || level > '2') {

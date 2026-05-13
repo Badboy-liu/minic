@@ -2,7 +2,7 @@ default rel
 
 global fn_bad_section
 
-section .pdata
+section .badsec
 custom_entry:
     dq 1
 

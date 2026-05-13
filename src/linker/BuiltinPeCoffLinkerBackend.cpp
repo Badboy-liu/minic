@@ -11,5 +11,6 @@ void BuiltinPeCoffLinkerBackend::link(
         invocation.objPaths,
         invocation.outputPath,
         invocation.jobs,
-        invocation.traceLinker ? &std::cout : nullptr);
+        invocation.traceLinker ? &std::cout : nullptr,
+        &invocation);
 }

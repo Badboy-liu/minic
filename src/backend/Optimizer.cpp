@@ -1,4 +1,7 @@
 #include "Optimizer.h"
+#include "PassManager.h"
+
+#include <functional>
 
 void Optimizer::optimize(Program &program, int level) {
     optLevel = level;
@@ -22,15 +25,20 @@ void Optimizer::optimize(Program &program, int level) {
 void Optimizer::optimizeFunction(Function &function) {
     constantEnv.clear();
     floatConstantEnv.clear();
+
+    PassManager pm;
     if (optLevel >= 2) {
-        propagateBlock(*function.body);
-        eliminateTailRecursion(function);
+        pm.addPass(std::make_unique<ConstantPropagationPass>());
+        pm.addPass(std::make_unique<CopyPropagationPass>());
+        pm.addPass(std::make_unique<TailRecursionPass>());
+        pm.addPass(std::make_unique<LoopUnrollPass>());
     }
-    optimizeBlock(*function.body);
+    pm.addPass(std::make_unique<ConstantFoldingPass>());
     if (optLevel >= 2) {
-        // 公共子表达式消除（暂时禁用：CSE 临时变量的栈偏移与代码生成器不兼容，需要与 CodeGenerator 协同实现）
-        // applyCSE(function);
+        pm.addPass(std::make_unique<CSEPass>());
+        pm.addPass(std::make_unique<DeadStoreElimPass>());
     }
+    pm.runFunction(function, *this);
 }
 
 void Optimizer::optimizeBlock(BlockStmt &block) {
@@ -544,6 +552,44 @@ void Optimizer::applyStrengthReduction(std::unique_ptr<Expr> &expr) {
         expr = std::move(shiftExpr);
         return;
     }
+
+    // x * (2^n + 1) → (x << n) + x
+    if (binary.op == BinaryOp::Multiply && rightValue > 2) {
+        long long shiftAmount = 0;
+        long long temp = rightValue;
+        while (temp > 1) { temp >>= 1; ++shiftAmount; }
+        if ((1LL << shiftAmount) + 1 == rightValue) {
+            auto shifted = std::make_unique<BinaryExpr>(BinaryOp::ShiftLeft,
+                std::move(binary.left), std::make_unique<NumberExpr>(shiftAmount));
+            shifted->type = expr->type;
+            shifted->isLValue = false;
+            auto addExpr = std::make_unique<BinaryExpr>(BinaryOp::Add,
+                std::move(shifted), std::move(binary.left));
+            addExpr->type = expr->type;
+            addExpr->isLValue = false;
+            expr = std::move(addExpr);
+            return;
+        }
+    }
+
+    // x * (2^n - 1) → (x << n) - x
+    if (binary.op == BinaryOp::Multiply && rightValue > 2) {
+        long long shiftAmount = 0;
+        long long temp = rightValue + 1;
+        while (temp > 1) { temp >>= 1; ++shiftAmount; }
+        if ((1LL << shiftAmount) - 1 == rightValue) {
+            auto shifted = std::make_unique<BinaryExpr>(BinaryOp::ShiftLeft,
+                std::move(binary.left), std::make_unique<NumberExpr>(shiftAmount));
+            shifted->type = expr->type;
+            shifted->isLValue = false;
+            auto subExpr = std::make_unique<BinaryExpr>(BinaryOp::Subtract,
+                std::move(shifted), std::move(binary.left));
+            subExpr->type = expr->type;
+            subExpr->isLValue = false;
+            expr = std::move(subExpr);
+            return;
+        }
+    }
 }
 
 bool Optimizer::applyArithmeticIdentity(std::unique_ptr<Expr> &expr) {
@@ -583,6 +629,12 @@ bool Optimizer::applyArithmeticIdentity(std::unique_ptr<Expr> &expr) {
             expr->isLValue = false;
             return true;
         }
+        // x & x → x
+        if (binary.left->kind == Expr::Kind::Variable && binary.right->kind == Expr::Kind::Variable &&
+            static_cast<VariableExpr &>(*binary.left).name == static_cast<VariableExpr &>(*binary.right).name) {
+            expr = std::move(binary.left);
+            return true;
+        }
         break;
     case BinaryOp::BitwiseOr:
         if (rightIsConst && rightVal == 0) { expr = std::move(binary.left); return true; }
@@ -593,10 +645,24 @@ bool Optimizer::applyArithmeticIdentity(std::unique_ptr<Expr> &expr) {
             expr->isLValue = false;
             return true;
         }
+        // x | x → x
+        if (binary.left->kind == Expr::Kind::Variable && binary.right->kind == Expr::Kind::Variable &&
+            static_cast<VariableExpr &>(*binary.left).name == static_cast<VariableExpr &>(*binary.right).name) {
+            expr = std::move(binary.left);
+            return true;
+        }
         break;
     case BinaryOp::BitwiseXor:
         if (rightIsConst && rightVal == 0) { expr = std::move(binary.left); return true; }
         if (leftIsConst && leftVal == 0) { expr = std::move(binary.right); return true; }
+        // x ^ x → 0
+        if (binary.left->kind == Expr::Kind::Variable && binary.right->kind == Expr::Kind::Variable &&
+            static_cast<VariableExpr &>(*binary.left).name == static_cast<VariableExpr &>(*binary.right).name) {
+            expr = std::make_unique<NumberExpr>(0);
+            expr->type = binary.type;
+            expr->isLValue = false;
+            return true;
+        }
         break;
     case BinaryOp::ShiftLeft:
     case BinaryOp::ShiftRight:
@@ -1141,6 +1207,720 @@ void Optimizer::propagateBlock(BlockStmt &block) {
     }
 }
 
+// ===================== 复制传播 =====================
+
+void Optimizer::applyCopyPropagation(Function &function) {
+    copyEnv.clear();
+    if (function.body) {
+        copyPropagateBlock(*function.body);
+    }
+}
+
+void Optimizer::copyPropagateBlock(BlockStmt &block) {
+    for (auto &statement : block.statements) {
+        copyPropagateStatement(*statement);
+    }
+}
+
+void Optimizer::copyPropagateStatement(Stmt &stmt) {
+    switch (stmt.kind) {
+    case Stmt::Kind::Decl: {
+        auto &decl = static_cast<DeclStmt &>(stmt);
+        copyPropagateExpr(decl.init);
+        // 如果初始化为变量，记录复制关系
+        if (decl.init && decl.init->kind == Expr::Kind::Variable) {
+            copyEnv[decl.name] = static_cast<VariableExpr *>(decl.init.get());
+        } else {
+            copyEnv.erase(decl.name);
+        }
+        return;
+    }
+    case Stmt::Kind::Expr:
+        copyPropagateExpr(static_cast<ExprStmt &>(stmt).expr);
+        return;
+    case Stmt::Kind::Return:
+        copyPropagateExpr(static_cast<ReturnStmt &>(stmt).expr);
+        return;
+    case Stmt::Kind::Block:
+        copyPropagateBlock(static_cast<BlockStmt &>(stmt));
+        return;
+    case Stmt::Kind::If: {
+        auto &ifStmt = static_cast<IfStmt &>(stmt);
+        copyPropagateExpr(ifStmt.condition);
+        auto saved = copyEnv;
+        copyPropagateStatement(*ifStmt.thenBranch);
+        auto thenEnv = copyEnv;
+        copyEnv = saved;
+        if (ifStmt.elseBranch) {
+            copyPropagateStatement(*ifStmt.elseBranch);
+        }
+        // 合并：两边都有的相同映射才保留（按源变量名比较）
+        for (auto it = copyEnv.begin(); it != copyEnv.end();) {
+            auto thenIt = thenEnv.find(it->first);
+            if (thenIt == thenEnv.end() ||
+                !thenIt->second || !it->second ||
+                thenIt->second->name != it->second->name) {
+                it = copyEnv.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        return;
+    }
+    case Stmt::Kind::While: {
+        auto &whileStmt = static_cast<WhileStmt &>(stmt);
+        copyPropagateExpr(whileStmt.condition);
+        copyEnv.clear();
+        copyPropagateStatement(*whileStmt.body);
+        copyEnv.clear();
+        return;
+    }
+    case Stmt::Kind::For: {
+        auto &forStmt = static_cast<ForStmt &>(stmt);
+        if (forStmt.init) {
+            copyPropagateStatement(*forStmt.init);
+        }
+        copyPropagateExpr(forStmt.condition);
+        copyEnv.clear();
+        if (forStmt.update) {
+            copyPropagateExpr(forStmt.update);
+        }
+        copyPropagateStatement(*forStmt.body);
+        copyEnv.clear();
+        return;
+    }
+    case Stmt::Kind::DoWhile: {
+        auto &doWhileStmt = static_cast<DoWhileStmt &>(stmt);
+        copyEnv.clear();
+        copyPropagateStatement(*doWhileStmt.body);
+        copyPropagateExpr(doWhileStmt.condition);
+        copyEnv.clear();
+        return;
+    }
+    case Stmt::Kind::Switch: {
+        auto &sw = static_cast<SwitchStmt &>(stmt);
+        copyPropagateExpr(sw.scrutinee);
+        copyEnv.clear();
+        for (auto &c : sw.cases) {
+            copyPropagateExpr(c.label);
+            copyPropagateStatement(*c.body);
+        }
+        if (sw.defaultBody) {
+            copyPropagateStatement(*sw.defaultBody);
+        }
+        copyEnv.clear();
+        return;
+    }
+    case Stmt::Kind::Break:
+    case Stmt::Kind::Continue:
+    case Stmt::Kind::Goto:
+        copyEnv.clear();
+        return;
+    case Stmt::Kind::Label:
+        copyPropagateStatement(*static_cast<LabelStmt &>(stmt).body);
+        return;
+    case Stmt::Kind::StaticAssert:
+        return;
+    }
+}
+
+void Optimizer::copyPropagateExpr(std::unique_ptr<Expr> &expr) {
+    if (!expr) return;
+
+    switch (expr->kind) {
+    case Expr::Kind::Variable: {
+        auto &var = static_cast<VariableExpr &>(*expr);
+        auto it = copyEnv.find(var.name);
+        if (it != copyEnv.end() && it->second) {
+            // 替换为复制源变量，保留 stackOffset/isGlobal/symbolName
+            auto *src = it->second;
+            auto replacement = std::make_unique<VariableExpr>(src->name);
+            replacement->type = expr->type;
+            replacement->isLValue = expr->isLValue;
+            replacement->stackOffset = src->stackOffset;
+            replacement->isGlobal = src->isGlobal;
+            replacement->symbolName = src->symbolName;
+            replacement->line = expr->line;
+            replacement->column = expr->column;
+            expr = std::move(replacement);
+        }
+        return;
+    }
+    case Expr::Kind::Unary: {
+        auto &unary = static_cast<UnaryExpr &>(*expr);
+        // 自增自减修改变量，清除相关映射
+        if (unary.op == UnaryOp::PreIncrement || unary.op == UnaryOp::PreDecrement ||
+            unary.op == UnaryOp::PostIncrement || unary.op == UnaryOp::PostDecrement) {
+            if (unary.operand && unary.operand->kind == Expr::Kind::Variable) {
+                auto &name = static_cast<VariableExpr &>(*unary.operand).name;
+                for (auto it = copyEnv.begin(); it != copyEnv.end();) {
+                    if (it->first == name || (it->second && it->second->name == name)) {
+                        it = copyEnv.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+            }
+        }
+        if (unary.op == UnaryOp::AddressOf || unary.op == UnaryOp::Dereference) {
+            return;
+        }
+        copyPropagateExpr(unary.operand);
+        return;
+    }
+    case Expr::Kind::Binary: {
+        auto &binary = static_cast<BinaryExpr &>(*expr);
+        copyPropagateExpr(binary.left);
+        copyPropagateExpr(binary.right);
+        return;
+    }
+    case Expr::Kind::Assign: {
+        auto &assign = static_cast<AssignExpr &>(*expr);
+        copyPropagateExpr(assign.value);
+        if (assign.target->kind == Expr::Kind::Variable) {
+            auto &varName = static_cast<VariableExpr &>(*assign.target).name;
+            if (!assign.isCompound && assign.value->kind == Expr::Kind::Variable) {
+                // x = y：记录复制关系
+                copyEnv[varName] = static_cast<VariableExpr *>(assign.value.get());
+            } else {
+                copyEnv.erase(varName);
+                // 清除指向此变量的映射
+                for (auto it = copyEnv.begin(); it != copyEnv.end();) {
+                    if (it->second && it->second->name == varName) {
+                        it = copyEnv.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+            }
+        }
+        return;
+    }
+    case Expr::Kind::Call: {
+        auto &call = static_cast<CallExpr &>(*expr);
+        copyPropagateExpr(call.callee);
+        for (auto &arg : call.arguments) {
+            copyPropagateExpr(arg);
+        }
+        // 函数调用可能修改任何变量，保守清除
+        copyEnv.clear();
+        return;
+    }
+    case Expr::Kind::Ternary: {
+        auto &ternary = static_cast<TernaryExpr &>(*expr);
+        copyPropagateExpr(ternary.condition);
+        copyPropagateExpr(ternary.thenExpr);
+        copyPropagateExpr(ternary.elseExpr);
+        return;
+    }
+    case Expr::Kind::Cast:
+        copyPropagateExpr(static_cast<CastExpr &>(*expr).operand);
+        return;
+    case Expr::Kind::Index: {
+        auto &index = static_cast<IndexExpr &>(*expr);
+        copyPropagateExpr(index.base);
+        copyPropagateExpr(index.index);
+        return;
+    }
+    case Expr::Kind::MemberAccess:
+        copyPropagateExpr(static_cast<MemberAccessExpr &>(*expr).base);
+        return;
+    case Expr::Kind::InitializerList: {
+        auto &list = static_cast<InitializerListExpr &>(*expr);
+        for (auto &element : list.elements) {
+            copyPropagateExpr(element);
+        }
+        return;
+    }
+    case Expr::Kind::StmtExpr: {
+        auto &se = static_cast<StmtExpr &>(*expr);
+        for (auto &s : se.statements) {
+            copyPropagateStatement(*s);
+        }
+        copyPropagateExpr(se.result);
+        return;
+    }
+    case Expr::Kind::Number:
+    case Expr::Kind::FloatLiteral:
+    case Expr::Kind::String:
+    case Expr::Kind::CompoundLiteral:
+    case Expr::Kind::BuiltinVaStart:
+    case Expr::Kind::BuiltinVaArg:
+    case Expr::Kind::BuiltinVaEnd:
+    case Expr::Kind::Generic:
+        return;
+    }
+}
+
+// ===================== 死存储消除 =====================
+
+void Optimizer::applyDeadStoreElimination(Function &function) {
+    if (function.body) {
+        eliminateDeadStoresInBlock(*function.body);
+    }
+}
+
+// 循环展开：将常数次 for 循环展开为顺序语句
+// 匹配模式：for (var = init; var < bound; var += step) body
+// 其中 bound 和 step 为常量，展开阈值为 16
+void Optimizer::applyLoopUnrolling(Function &function) {
+    if (!function.body) return;
+    applyLoopUnrollBlock(*function.body);
+}
+
+void Optimizer::applyLoopUnrollBlock(BlockStmt &block) {
+    constexpr int UNROLL_LIMIT = 16;
+
+    for (std::size_t i = 0; i < block.statements.size(); ++i) {
+        auto &stmt = block.statements[i];
+        if (stmt->kind != Stmt::Kind::For) {
+            // 递归处理嵌套块
+            if (stmt->kind == Stmt::Kind::Block) {
+                applyLoopUnrollBlock(static_cast<BlockStmt &>(*stmt));
+            } else if (stmt->kind == Stmt::Kind::If) {
+                auto &ifStmt = static_cast<IfStmt &>(*stmt);
+                if (ifStmt.thenBranch && ifStmt.thenBranch->kind == Stmt::Kind::Block)
+                    applyLoopUnrollBlock(static_cast<BlockStmt &>(*ifStmt.thenBranch));
+                if (ifStmt.elseBranch && ifStmt.elseBranch->kind == Stmt::Kind::Block)
+                    applyLoopUnrollBlock(static_cast<BlockStmt &>(*ifStmt.elseBranch));
+            }
+            continue;
+        }
+
+        auto &forStmt = static_cast<ForStmt &>(*stmt);
+        if (!forStmt.body || forStmt.body->kind != Stmt::Kind::Block) continue;
+        auto &body = static_cast<BlockStmt &>(*forStmt.body);
+
+        // 检测 for (var = init; var < bound; var += step) 模式
+        // 1. init 必须是 DeclStmt 或 ExprStmt(Assign)
+        // 2. condition 必须是 var < bound 或 var <= bound
+        // 3. update 必须是 var++ 或 var += step 或 var = var + step
+
+        std::string iterVar;
+        long long initVal = 0;
+
+        // 解析 init
+        if (!forStmt.init) continue;
+        if (forStmt.init->kind == Stmt::Kind::Decl) {
+            auto &decl = static_cast<DeclStmt &>(*forStmt.init);
+            iterVar = decl.name;
+            if (!decl.init || decl.init->kind != Expr::Kind::Number) continue;
+            initVal = static_cast<NumberExpr &>(*decl.init).value;
+        } else if (forStmt.init->kind == Stmt::Kind::Expr) {
+            auto &exprStmt = static_cast<ExprStmt &>(*forStmt.init);
+            if (exprStmt.expr->kind != Expr::Kind::Assign) continue;
+            auto &assign = static_cast<AssignExpr &>(*exprStmt.expr);
+            if (assign.isCompound || assign.target->kind != Expr::Kind::Variable) continue;
+            iterVar = static_cast<VariableExpr &>(*assign.target).name;
+            if (assign.value->kind != Expr::Kind::Number) continue;
+            initVal = static_cast<NumberExpr &>(*assign.value).value;
+        } else {
+            continue;
+        }
+
+        // 解析 condition
+        if (!forStmt.condition || forStmt.condition->kind != Expr::Kind::Binary) continue;
+        auto &cond = static_cast<BinaryExpr &>(*forStmt.condition);
+        if (cond.left->kind != Expr::Kind::Variable) continue;
+        if (static_cast<VariableExpr &>(*cond.left).name != iterVar) continue;
+        if (cond.right->kind != Expr::Kind::Number) continue;
+        long long boundVal = static_cast<NumberExpr &>(*cond.right).value;
+
+        bool inclusive = false;  // <= vs <
+        if (cond.op == BinaryOp::Less) {
+            inclusive = false;
+        } else if (cond.op == BinaryOp::LessEqual) {
+            inclusive = true;
+        } else {
+            continue;
+        }
+
+        // 解析 update
+        if (!forStmt.update) continue;
+        long long stepVal = 1;
+
+        if (forStmt.update->kind == Expr::Kind::Unary) {
+            // var++ 或 ++var
+            auto &unary = static_cast<UnaryExpr &>(*forStmt.update);
+            if (unary.op != UnaryOp::PostIncrement && unary.op != UnaryOp::PreIncrement) continue;
+            if (unary.operand->kind != Expr::Kind::Variable) continue;
+            if (static_cast<VariableExpr &>(*unary.operand).name != iterVar) continue;
+            stepVal = 1;
+        } else if (forStmt.update->kind == Expr::Kind::Assign) {
+            auto &assign = static_cast<AssignExpr &>(*forStmt.update);
+            if (assign.target->kind != Expr::Kind::Variable) continue;
+            if (static_cast<VariableExpr &>(*assign.target).name != iterVar) continue;
+
+            if (assign.isCompound) {
+                // var += step
+                if (assign.value->kind != Expr::Kind::Number) continue;
+                stepVal = static_cast<NumberExpr &>(*assign.value).value;
+            } else if (assign.value->kind == Expr::Kind::Binary) {
+                // var = var + step
+                auto &rhs = static_cast<BinaryExpr &>(*assign.value);
+                if (rhs.op != BinaryOp::Add && rhs.op != BinaryOp::Subtract) continue;
+                if (rhs.left->kind != Expr::Kind::Variable) continue;
+                if (static_cast<VariableExpr &>(*rhs.left).name != iterVar) continue;
+                if (rhs.right->kind != Expr::Kind::Number) continue;
+                stepVal = static_cast<NumberExpr &>(*rhs.right).value;
+                if (rhs.op == BinaryOp::Subtract) stepVal = -stepVal;
+            } else {
+                continue;
+            }
+        } else {
+            continue;
+        }
+
+        if (stepVal <= 0) continue;
+
+        // 计算迭代次数
+        long long tripCount;
+        if (inclusive) {
+            tripCount = (boundVal - initVal) / stepVal + 1;
+        } else {
+            tripCount = (boundVal - initVal + stepVal - 1) / stepVal;
+        }
+        if (tripCount < 2 || tripCount > UNROLL_LIMIT) continue;
+
+        // 检查循环体是否有 break/continue（不展开含控制流跳转的循环）
+        bool hasJump = false;
+        std::function<void(const Stmt &)> checkJump = [&](const Stmt &s) {
+            if (s.kind == Stmt::Kind::Break || s.kind == Stmt::Kind::Continue) {
+                hasJump = true;
+                return;
+            }
+            if (s.kind == Stmt::Kind::Block) {
+                for (auto &child : static_cast<const BlockStmt &>(s).statements) {
+                    checkJump(*child);
+                    if (hasJump) return;
+                }
+            } else if (s.kind == Stmt::Kind::If) {
+                auto &ifS = static_cast<const IfStmt &>(s);
+                checkJump(*ifS.thenBranch);
+                if (hasJump) return;
+                if (ifS.elseBranch) checkJump(*ifS.elseBranch);
+            }
+        };
+        checkJump(body);
+        if (hasJump) continue;
+
+        // 展开循环
+        auto result = std::make_unique<BlockStmt>();
+
+        // 添加初始化语句
+        if (forStmt.init) {
+            result->statements.push_back(cloneStmt(*forStmt.init));
+        }
+
+        int count = static_cast<int>(tripCount);
+        for (int iter = 0; iter < count; ++iter) {
+            // 克隆循环体
+            for (auto &bodyStmt : body.statements) {
+                result->statements.push_back(cloneStmt(*bodyStmt));
+            }
+            // 添加 update（最后一次不添加）
+            if (iter < count - 1 && forStmt.update) {
+                result->statements.push_back(
+                    std::make_unique<ExprStmt>(cloneExpr(*forStmt.update)));
+            }
+        }
+
+        // 替换原始 for 语句
+        block.statements[i] = std::move(result);
+        // 继续处理替换后的块（可能包含嵌套 for）
+        --i;
+    }
+}
+
+// 收集表达式中使用的变量名
+void Optimizer::collectExprUses(const Expr &expr, std::unordered_set<std::string> &uses) {
+    switch (expr.kind) {
+    case Expr::Kind::Variable:
+        uses.insert(static_cast<const VariableExpr &>(expr).name);
+        return;
+    case Expr::Kind::Unary:
+        collectExprUses(*static_cast<const UnaryExpr &>(expr).operand, uses);
+        return;
+    case Expr::Kind::Binary: {
+        auto &binary = static_cast<const BinaryExpr &>(expr);
+        collectExprUses(*binary.left, uses);
+        collectExprUses(*binary.right, uses);
+        return;
+    }
+    case Expr::Kind::Assign: {
+        auto &assign = static_cast<const AssignExpr &>(expr);
+        collectExprUses(*assign.target, uses);
+        collectExprUses(*assign.value, uses);
+        return;
+    }
+    case Expr::Kind::Call: {
+        auto &call = static_cast<const CallExpr &>(expr);
+        if (call.callee) collectExprUses(*call.callee, uses);
+        for (auto &arg : call.arguments) {
+            collectExprUses(*arg, uses);
+        }
+        return;
+    }
+    case Expr::Kind::Index: {
+        auto &index = static_cast<const IndexExpr &>(expr);
+        collectExprUses(*index.base, uses);
+        collectExprUses(*index.index, uses);
+        return;
+    }
+    case Expr::Kind::MemberAccess:
+        collectExprUses(*static_cast<const MemberAccessExpr &>(expr).base, uses);
+        return;
+    case Expr::Kind::Ternary: {
+        auto &ternary = static_cast<const TernaryExpr &>(expr);
+        collectExprUses(*ternary.condition, uses);
+        collectExprUses(*ternary.thenExpr, uses);
+        collectExprUses(*ternary.elseExpr, uses);
+        return;
+    }
+    case Expr::Kind::Cast:
+        collectExprUses(*static_cast<const CastExpr &>(expr).operand, uses);
+        return;
+    case Expr::Kind::InitializerList: {
+        auto &list = static_cast<const InitializerListExpr &>(expr);
+        for (auto &elem : list.elements) {
+            collectExprUses(*elem, uses);
+        }
+        return;
+    }
+    case Expr::Kind::StmtExpr: {
+        auto &se = static_cast<const StmtExpr &>(expr);
+        for (auto &stmt : se.statements) {
+            if (stmt->kind == Stmt::Kind::Expr) {
+                collectExprUses(*static_cast<const ExprStmt &>(*stmt).expr, uses);
+            }
+        }
+        if (se.result) collectExprUses(*se.result, uses);
+        return;
+    }
+    case Expr::Kind::CompoundLiteral:
+        if (static_cast<const CompoundLiteralExpr &>(expr).init) {
+            collectExprUses(*static_cast<const CompoundLiteralExpr &>(expr).init, uses);
+        }
+        return;
+    case Expr::Kind::BuiltinVaStart:
+        if (static_cast<const BuiltinVaStartExpr &>(expr).ap) {
+            collectExprUses(*static_cast<const BuiltinVaStartExpr &>(expr).ap, uses);
+        }
+        return;
+    case Expr::Kind::BuiltinVaArg:
+        if (static_cast<const BuiltinVaArgExpr &>(expr).ap) {
+            collectExprUses(*static_cast<const BuiltinVaArgExpr &>(expr).ap, uses);
+        }
+        return;
+    case Expr::Kind::BuiltinVaEnd:
+        if (static_cast<const BuiltinVaEndExpr &>(expr).ap) {
+            collectExprUses(*static_cast<const BuiltinVaEndExpr &>(expr).ap, uses);
+        }
+        return;
+    case Expr::Kind::Generic: {
+        auto &g = static_cast<const GenericExpr &>(expr);
+        if (g.controllingExpr) collectExprUses(*g.controllingExpr, uses);
+        for (auto &assoc : g.associations) {
+            if (assoc.expr) collectExprUses(*assoc.expr, uses);
+        }
+        return;
+    }
+    case Expr::Kind::Number:
+    case Expr::Kind::FloatLiteral:
+    case Expr::Kind::String:
+        return;
+    }
+}
+
+// 检查表达式是否有副作用
+bool Optimizer::hasSideEffects(const Expr &expr) {
+    switch (expr.kind) {
+    case Expr::Kind::Call:
+        return true;  // 函数调用视为有副作用
+    case Expr::Kind::Unary: {
+        auto &unary = static_cast<const UnaryExpr &>(expr);
+        // 自增自减有副作用
+        if (unary.op == UnaryOp::PreIncrement || unary.op == UnaryOp::PreDecrement ||
+            unary.op == UnaryOp::PostIncrement || unary.op == UnaryOp::PostDecrement) {
+            return true;
+        }
+        return hasSideEffects(*unary.operand);
+    }
+    case Expr::Kind::Binary: {
+        auto &binary = static_cast<const BinaryExpr &>(expr);
+        return hasSideEffects(*binary.left) || hasSideEffects(*binary.right);
+    }
+    case Expr::Kind::Assign:
+        return true;  // 赋值本身有副作用
+    case Expr::Kind::Ternary: {
+        auto &ternary = static_cast<const TernaryExpr &>(expr);
+        return hasSideEffects(*ternary.condition) || hasSideEffects(*ternary.thenExpr) ||
+               hasSideEffects(*ternary.elseExpr);
+    }
+    case Expr::Kind::Cast:
+        return hasSideEffects(*static_cast<const CastExpr &>(expr).operand);
+    case Expr::Kind::Index: {
+        auto &index = static_cast<const IndexExpr &>(expr);
+        return hasSideEffects(*index.base) || hasSideEffects(*index.index);
+    }
+    case Expr::Kind::MemberAccess:
+        return hasSideEffects(*static_cast<const MemberAccessExpr &>(expr).base);
+    case Expr::Kind::InitializerList: {
+        auto &list = static_cast<const InitializerListExpr &>(expr);
+        for (auto &elem : list.elements) {
+            if (hasSideEffects(*elem)) return true;
+        }
+        return false;
+    }
+    case Expr::Kind::StmtExpr: {
+        auto &se = static_cast<const StmtExpr &>(expr);
+        for (auto &stmt : se.statements) {
+            if (stmt->kind == Stmt::Kind::Expr && hasSideEffects(*static_cast<const ExprStmt &>(*stmt).expr)) {
+                return true;
+            }
+        }
+        return se.result && hasSideEffects(*se.result);
+    }
+    case Expr::Kind::BuiltinVaStart:
+    case Expr::Kind::BuiltinVaArg:
+    case Expr::Kind::BuiltinVaEnd:
+        return true;
+    case Expr::Kind::CompoundLiteral:
+        return static_cast<const CompoundLiteralExpr &>(expr).init &&
+               hasSideEffects(*static_cast<const CompoundLiteralExpr &>(expr).init);
+    case Expr::Kind::Generic: {
+        auto &g = static_cast<const GenericExpr &>(expr);
+        if (g.controllingExpr && hasSideEffects(*g.controllingExpr)) return true;
+        for (auto &assoc : g.associations) {
+            if (assoc.expr && hasSideEffects(*assoc.expr)) return true;
+        }
+        return false;
+    }
+    case Expr::Kind::Number:
+    case Expr::Kind::FloatLiteral:
+    case Expr::Kind::String:
+    case Expr::Kind::Variable:
+        return false;
+    }
+    return false;
+}
+
+// 死存储消除：移除写入后未读取的变量赋值
+// 保守策略：只在确认变量在后续所有路径中未被使用时才移除
+bool Optimizer::eliminateDeadStoresInBlock(BlockStmt &block) {
+    // 向后扫描：如果一个赋值的变量在后续语句中未被使用，且无副作用，则移除
+    bool changed = false;
+    for (int i = static_cast<int>(block.statements.size()) - 1; i >= 0; --i) {
+        auto &stmt = block.statements[static_cast<size_t>(i)];
+
+        // 只处理简单的表达式语句：x = expr;
+        if (stmt->kind != Stmt::Kind::Expr) continue;
+        auto &exprStmt = static_cast<ExprStmt &>(*stmt);
+        if (exprStmt.expr->kind != Expr::Kind::Assign) continue;
+        auto &assign = static_cast<AssignExpr &>(*exprStmt.expr);
+
+        // 只处理简单变量赋值（非复合赋值）
+        if (assign.isCompound) continue;
+        if (assign.target->kind != Expr::Kind::Variable) continue;
+        auto &targetVar = static_cast<VariableExpr &>(*assign.target);
+        // 跳过全局变量——其存储对其他函数可见
+        if (targetVar.isGlobal) continue;
+        auto &varName = targetVar.name;
+
+        // 如果 RHS 有副作用，保留
+        if (hasSideEffects(*assign.value)) continue;
+
+        // 检查变量在后续语句中是否被使用（包括嵌套块）
+        bool usedLater = false;
+        for (size_t j = static_cast<size_t>(i) + 1; j < block.statements.size(); ++j) {
+            std::unordered_set<std::string> laterUses;
+            // 递归收集后续语句及其嵌套块中的所有变量使用
+            std::function<void(const Stmt &)> collectStmtUses = [&](const Stmt &s) {
+                switch (s.kind) {
+                case Stmt::Kind::Expr:
+                    collectExprUses(*static_cast<const ExprStmt &>(s).expr, laterUses);
+                    break;
+                case Stmt::Kind::Return:
+                    if (static_cast<const ReturnStmt &>(s).expr)
+                        collectExprUses(*static_cast<const ReturnStmt &>(s).expr, laterUses);
+                    break;
+                case Stmt::Kind::Decl:
+                    if (static_cast<const DeclStmt &>(s).init)
+                        collectExprUses(*static_cast<const DeclStmt &>(s).init, laterUses);
+                    break;
+                case Stmt::Kind::Block:
+                    for (auto &nested : static_cast<const BlockStmt &>(s).statements) {
+                        collectStmtUses(*nested);
+                    }
+                    break;
+                case Stmt::Kind::If: {
+                    auto &ifStmt = static_cast<const IfStmt &>(s);
+                    collectExprUses(*ifStmt.condition, laterUses);
+                    collectStmtUses(*ifStmt.thenBranch);
+                    if (ifStmt.elseBranch) collectStmtUses(*ifStmt.elseBranch);
+                    break;
+                }
+                case Stmt::Kind::While: {
+                    auto &whileStmt = static_cast<const WhileStmt &>(s);
+                    collectExprUses(*whileStmt.condition, laterUses);
+                    collectStmtUses(*whileStmt.body);
+                    break;
+                }
+                case Stmt::Kind::For: {
+                    auto &forStmt = static_cast<const ForStmt &>(s);
+                    if (forStmt.init) collectStmtUses(*forStmt.init);
+                    if (forStmt.condition) collectExprUses(*forStmt.condition, laterUses);
+                    if (forStmt.update) collectExprUses(*forStmt.update, laterUses);
+                    collectStmtUses(*forStmt.body);
+                    break;
+                }
+                case Stmt::Kind::DoWhile: {
+                    auto &doWhileStmt = static_cast<const DoWhileStmt &>(s);
+                    collectStmtUses(*doWhileStmt.body);
+                    collectExprUses(*doWhileStmt.condition, laterUses);
+                    break;
+                }
+                case Stmt::Kind::Switch: {
+                    auto &sw = static_cast<const SwitchStmt &>(s);
+                    collectExprUses(*sw.scrutinee, laterUses);
+                    for (auto &c : sw.cases) {
+                        collectExprUses(*c.label, laterUses);
+                        collectStmtUses(*c.body);
+                    }
+                    if (sw.defaultBody) collectStmtUses(*sw.defaultBody);
+                    break;
+                }
+                default:
+                    break;
+                }
+            };
+            collectStmtUses(*block.statements[j]);
+            if (laterUses.count(varName)) {
+                usedLater = true;
+                break;
+            }
+            // 如果后续语句重新赋值同一变量，停止搜索
+            if (block.statements[j]->kind == Stmt::Kind::Expr) {
+                auto &laterExpr = static_cast<const ExprStmt &>(*block.statements[j]).expr;
+                if (laterExpr->kind == Expr::Kind::Assign) {
+                    auto &laterAssign = static_cast<const AssignExpr &>(*laterExpr);
+                    if (laterAssign.target->kind == Expr::Kind::Variable &&
+                        static_cast<const VariableExpr &>(*laterAssign.target).name == varName) {
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (!usedLater) {
+            block.statements.erase(block.statements.begin() + i);
+            changed = true;
+        }
+    }
+
+    return changed;
+}
+
 // ===================== 死代码消除 =====================
 
 // 消除不可达代码和无副作用的无用表达式，返回是否有修改
@@ -1485,6 +2265,10 @@ std::unique_ptr<Stmt> Optimizer::cloneStmt(const Stmt &stmt) {
         auto c = std::make_unique<DeclStmt>(d.type, d.name, std::move(clonedInit));
         c->line = d.line;
         c->column = d.column;
+        c->stackOffset = d.stackOffset;
+        c->isStatic = d.isStatic;
+        c->staticSymbolName = d.staticSymbolName;
+        c->vlaSizeExpr = d.vlaSizeExpr ? cloneExpr(*d.vlaSizeExpr) : nullptr;
         return c;
     }
     case Stmt::Kind::Expr: {
@@ -1892,8 +2676,8 @@ void Optimizer::cseExpr(std::unique_ptr<Expr> &expr,
         if (stackSize % align != 0) {
             stackSize += align - (stackSize % align);
         }
-        int stackOffset = stackSize;
         stackSize += size;
+        int stackOffset = stackSize;
 
         std::unordered_set<std::string> usedVars;
         collectExprVars(*expr, usedVars);
@@ -1956,9 +2740,96 @@ void Optimizer::applyCSE(Function &function) {
         } else if (stmt->kind == Stmt::Kind::If) {
             auto &ifStmt = static_cast<IfStmt &>(*stmt);
             cseExpr(ifStmt.condition, availableExprs, newStmts, tempCounter, stackSize);
-            availableExprs.clear();
+
+            // 保存当前可用表达式状态
+            auto savedExprs = availableExprs;
+            int savedCounter = tempCounter;
+            int savedStack = stackSize;
+
+            // 处理 then 分支
+            std::vector<std::unique_ptr<Stmt>> thenStmts;
+            if (ifStmt.thenBranch->kind == Stmt::Kind::Block) {
+                auto &thenBlock = static_cast<BlockStmt &>(*ifStmt.thenBranch);
+                for (auto &s : thenBlock.statements) {
+                    if (s->kind == Stmt::Kind::Expr) {
+                        auto &e = static_cast<ExprStmt &>(*s);
+                        cseExpr(e.expr, availableExprs, thenStmts, tempCounter, stackSize);
+                        if (e.expr->kind == Expr::Kind::Assign) {
+                            auto &a = static_cast<AssignExpr &>(*e.expr);
+                            if (a.target->kind == Expr::Kind::Variable) {
+                                invalidateCSE(availableExprs, static_cast<const VariableExpr &>(*a.target).name);
+                            } else {
+                                availableExprs.clear();
+                            }
+                        }
+                    } else if (s->kind == Stmt::Kind::Decl) {
+                        auto &d = static_cast<DeclStmt &>(*s);
+                        if (d.init) cseExpr(d.init, availableExprs, thenStmts, tempCounter, stackSize);
+                        invalidateCSE(availableExprs, d.name);
+                    } else {
+                        // 控制流语句，保守清除
+                        availableExprs.clear();
+                    }
+                    thenStmts.push_back(std::move(s));
+                }
+                thenBlock.statements = std::move(thenStmts);
+            }
+
+            auto thenExprs = availableExprs;
+            int thenCounter = tempCounter;
+            int thenStack = stackSize;
+
+            // 处理 else 分支（如果有）
+            if (ifStmt.elseBranch) {
+                availableExprs = savedExprs;
+                tempCounter = savedCounter;
+                stackSize = savedStack;
+
+                std::vector<std::unique_ptr<Stmt>> elseStmts;
+                if (ifStmt.elseBranch->kind == Stmt::Kind::Block) {
+                    auto &elseBlock = static_cast<BlockStmt &>(*ifStmt.elseBranch);
+                    for (auto &s : elseBlock.statements) {
+                        if (s->kind == Stmt::Kind::Expr) {
+                            auto &e = static_cast<ExprStmt &>(*s);
+                            cseExpr(e.expr, availableExprs, elseStmts, tempCounter, stackSize);
+                            if (e.expr->kind == Expr::Kind::Assign) {
+                                auto &a = static_cast<AssignExpr &>(*e.expr);
+                                if (a.target->kind == Expr::Kind::Variable) {
+                                    invalidateCSE(availableExprs, static_cast<const VariableExpr &>(*a.target).name);
+                                } else {
+                                    availableExprs.clear();
+                                }
+                            }
+                        } else if (s->kind == Stmt::Kind::Decl) {
+                            auto &d = static_cast<DeclStmt &>(*s);
+                            if (d.init) cseExpr(d.init, availableExprs, elseStmts, tempCounter, stackSize);
+                            invalidateCSE(availableExprs, d.name);
+                        } else {
+                            availableExprs.clear();
+                        }
+                        elseStmts.push_back(std::move(s));
+                    }
+                    elseBlock.statements = std::move(elseStmts);
+                }
+
+                // 合并：取两边交集
+                for (auto it = availableExprs.begin(); it != availableExprs.end();) {
+                    auto thenIt = thenExprs.find(it->first);
+                    if (thenIt == thenExprs.end() || thenIt->second.tempName != it->second.tempName) {
+                        it = availableExprs.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+                tempCounter = std::max(tempCounter, thenCounter);
+                stackSize = std::max(stackSize, thenStack);
+            } else {
+                // 没有 else 分支，保守清除
+                availableExprs.clear();
+            }
         } else if (stmt->kind == Stmt::Kind::While || stmt->kind == Stmt::Kind::For ||
                    stmt->kind == Stmt::Kind::DoWhile) {
+            // 循环：保守清除（循环可能执行多次）
             availableExprs.clear();
         }
 

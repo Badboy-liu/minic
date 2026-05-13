@@ -157,7 +157,7 @@ Parameter Parser::parseParameter() {
 
 TypePtr Parser::parseStructType() {
     const Token &nameToken = consume(TokenKind::Identifier, "expected struct tag");
-    const std::string structName = nameToken.lexeme;
+    const std::string &structName = nameToken.lexeme;
 
     if (!match(TokenKind::LeftBrace)) {
         const auto found = structTypes.find(structName);
@@ -168,7 +168,9 @@ TypePtr Parser::parseStructType() {
     }
 
     std::vector<StructMember> members;
-    if (structTypes.find(structName) != structTypes.end()) {
+    // 使用 emplace 检测重复，避免二次查找
+    auto [it, inserted] = structTypes.emplace(structName, nullptr);
+    if (!inserted) {
         fail(nameToken, "duplicate struct definition: " + structName);
     }
     while (!check(TokenKind::RightBrace)) {
@@ -210,13 +212,13 @@ TypePtr Parser::parseStructType() {
     consume(TokenKind::RightBrace, "expected '}' after struct definition");
 
     TypePtr structType = Type::makeStruct(structName, std::move(members));
-    structTypes[structName] = structType;
+    it->second = structType;
     return structType;
 }
 
 TypePtr Parser::parseUnionType() {
     const Token &nameToken = consume(TokenKind::Identifier, "expected union tag");
-    const std::string unionName = nameToken.lexeme;
+    const std::string &unionName = nameToken.lexeme;
 
     if (!match(TokenKind::LeftBrace)) {
         const auto found = unionTypes.find(unionName);
@@ -227,7 +229,8 @@ TypePtr Parser::parseUnionType() {
     }
 
     std::vector<StructMember> members;
-    if (unionTypes.find(unionName) != unionTypes.end()) {
+    auto [it, inserted] = unionTypes.emplace(unionName, nullptr);
+    if (!inserted) {
         fail(nameToken, "duplicate union definition: " + unionName);
     }
     while (!check(TokenKind::RightBrace)) {
@@ -252,7 +255,7 @@ TypePtr Parser::parseUnionType() {
     consume(TokenKind::RightBrace, "expected '}' after union definition");
 
     TypePtr unionType = Type::makeUnion(unionName, std::move(members));
-    unionTypes[unionName] = unionType;
+    it->second = unionType;
     return unionType;
 }
 
@@ -396,6 +399,7 @@ Parser::ParsedDeclarator Parser::parseVariableDeclarator(TypePtr declaredType) {
 
 std::vector<TypePtr> Parser::parseFunctionTypeParameters() {
     std::vector<TypePtr> parameters;
+    parameters.reserve(4);
     if (check(TokenKind::RightParen)) {
         return parameters;
     }
@@ -752,33 +756,65 @@ std::unique_ptr<Stmt> Parser::parseForStatement() {
     consume(TokenKind::LeftParen, "expected '(' after 'for'");
 
     std::unique_ptr<Stmt> init;
-    if (match(TokenKind::Semicolon)) {
-    } else if (isTypeSpecifier(peek().kind)) {
-        init = parseDeclaration(parseType());
-    } else {
-        auto initExpr = parseExpression();
-        int initLine = initExpr->line;
-        int initColumn = initExpr->column;
-        consume(TokenKind::Semicolon, "expected ';' after for initializer");
-        auto exprStmt = std::make_unique<ExprStmt>(std::move(initExpr));
-        exprStmt->line = initLine;
-        exprStmt->column = initColumn;
-        init = std::move(exprStmt);
+    try {
+        if (match(TokenKind::Semicolon)) {
+        } else if (isTypeSpecifier(peek().kind)) {
+            init = parseDeclaration(parseType());
+        } else {
+            auto initExpr = parseExpression();
+            int initLine = initExpr->line;
+            int initColumn = initExpr->column;
+            consume(TokenKind::Semicolon, "expected ';' after for initializer");
+            auto exprStmt = std::make_unique<ExprStmt>(std::move(initExpr));
+            exprStmt->line = initLine;
+            exprStmt->column = initColumn;
+            init = std::move(exprStmt);
+        }
+    } catch (const std::runtime_error &) {
+        // init 解析失败，跳到分号
+        while (!check(TokenKind::Semicolon) && !check(TokenKind::EndOfFile)) {
+            advance();
+        }
+        if (check(TokenKind::Semicolon)) advance();
     }
 
     std::unique_ptr<Expr> condition;
-    if (!check(TokenKind::Semicolon)) {
-        condition = parseExpression();
+    try {
+        if (!check(TokenKind::Semicolon)) {
+            condition = parseExpression();
+        }
+        consume(TokenKind::Semicolon, "expected ';' after for condition");
+    } catch (const std::runtime_error &) {
+        condition = nullptr;
+        while (!check(TokenKind::Semicolon) && !check(TokenKind::EndOfFile)) {
+            advance();
+        }
+        if (check(TokenKind::Semicolon)) advance();
     }
-    consume(TokenKind::Semicolon, "expected ';' after for condition");
 
     std::unique_ptr<Expr> update;
-    if (!check(TokenKind::RightParen)) {
-        update = parseExpression();
+    try {
+        if (!check(TokenKind::RightParen)) {
+            update = parseExpression();
+        }
+        consume(TokenKind::RightParen, "expected ')' after for clauses");
+    } catch (const std::runtime_error &) {
+        update = nullptr;
+        while (!check(TokenKind::RightParen) && !check(TokenKind::EndOfFile)) {
+            advance();
+        }
+        if (check(TokenKind::RightParen)) advance();
     }
-    consume(TokenKind::RightParen, "expected ')' after for clauses");
 
-    auto forStmt = std::make_unique<ForStmt>(std::move(init), std::move(condition), std::move(update), parseStatement());
+    std::unique_ptr<Stmt> body;
+    try {
+        body = parseStatement();
+    } catch (const std::runtime_error &) {
+        synchronize();
+        body = std::make_unique<BlockStmt>();
+    }
+
+    auto forStmt = std::make_unique<ForStmt>(std::move(init), std::move(condition), std::move(update), std::move(body));
     forStmt->line = forToken.line;
     forStmt->column = forToken.column;
     return forStmt;
@@ -890,16 +926,26 @@ std::unique_ptr<Stmt> Parser::parseSwitchStatement() {
     std::unique_ptr<Stmt> defaultBody;
 
     while (!check(TokenKind::RightBrace) && !check(TokenKind::EndOfFile)) {
-        if (match(TokenKind::KeywordCase)) {
-            auto label = parseExpression();
-            consume(TokenKind::Colon, "expected ':' after case label");
-            auto body = parseCaseBody();
-            cases.push_back({std::move(label), std::move(body)});
-        } else if (match(TokenKind::KeywordDefault)) {
-            consume(TokenKind::Colon, "expected ':' after 'default'");
-            defaultBody = parseCaseBody();
-        } else {
-            fail(peek(), "expected 'case' or 'default' in switch body");
+        try {
+            if (match(TokenKind::KeywordCase)) {
+                auto label = parseExpression();
+                consume(TokenKind::Colon, "expected ':' after case label");
+                auto body = parseCaseBody();
+                cases.push_back({std::move(label), std::move(body)});
+            } else if (match(TokenKind::KeywordDefault)) {
+                consume(TokenKind::Colon, "expected ':' after 'default'");
+                defaultBody = parseCaseBody();
+            } else {
+                fail(peek(), "expected 'case' or 'default' in switch body");
+            }
+        } catch (const std::runtime_error &) {
+            // case 解析失败，同步到下一个 case/default/}
+            while (!check(TokenKind::RightBrace) &&
+                   !check(TokenKind::KeywordCase) &&
+                   !check(TokenKind::KeywordDefault) &&
+                   !check(TokenKind::EndOfFile)) {
+                advance();
+            }
         }
     }
     consume(TokenKind::RightBrace, "expected '}' to close switch body");
@@ -1640,14 +1686,37 @@ void Parser::diagError(const Token &token, const std::string &message) {
 }
 
 void Parser::synchronize() {
-    // 跳过 token 直到找到语句边界（分号或右花括号）
+    // 跳过 token 直到找到语句边界
+    int braceDepth = 0;
     while (!check(TokenKind::EndOfFile)) {
         if (check(TokenKind::Semicolon)) {
             advance(); // 消耗分号
             return;
         }
+        // 只在顶层花括号处同步（不跳过嵌套块）
         if (check(TokenKind::RightBrace)) {
-            advance(); // 消耗右花括号，避免无限循环
+            if (braceDepth == 0) {
+                return; // 不消耗，留给外层解析
+            }
+            --braceDepth;
+            advance();
+            continue;
+        }
+        if (check(TokenKind::LeftBrace)) {
+            ++braceDepth;
+            advance();
+            continue;
+        }
+        // switch 内的同步点
+        if (check(TokenKind::KeywordCase) || check(TokenKind::KeywordDefault)) {
+            return;
+        }
+        // if-else 恢复
+        if (check(TokenKind::KeywordElse)) {
+            return;
+        }
+        // do-while 结尾
+        if (check(TokenKind::KeywordWhile)) {
             return;
         }
         advance();

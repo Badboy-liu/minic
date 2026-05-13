@@ -6,6 +6,11 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# MSVC UTF-8 源文件编码
+if (MSVC)
+    add_compile_options(/utf-8)
+endif()
+
 enable_testing()
 
 if (WIN32)
@@ -42,8 +47,48 @@ set(MINIC_CORE_SOURCES
     src/linker/PeLinker.h
     src/backend/CodeGenerator.cpp
     src/backend/CodeGenerator.h
+    src/backend/CodeGenExpr.cpp
+    src/backend/CodeGenStmt.cpp
+    src/backend/CodeGenCall.cpp
+    src/backend/CodeGenInit.cpp
+    src/backend/CodeGenDwarf.cpp
+    src/backend/CFG.h
+    src/backend/CFGBuilder.h
+    src/backend/CFGBuilder.cpp
     src/backend/Optimizer.cpp
     src/backend/Optimizer.h
+    src/backend/PassManager.cpp
+    src/backend/PassManager.h
+    src/backend/ir/IRPrinter.cpp
+    src/backend/ir/IRPrinter.h
+    src/backend/ir/IRType.h
+    src/backend/ir/IRValue.h
+    src/backend/ir/IRInstruction.h
+    src/backend/ir/IRBasicBlock.h
+    src/backend/ir/IRFunction.h
+    src/backend/ir/IRModule.h
+    src/backend/ir/IRLowering.h
+    src/backend/ir/IRLowering.cpp
+    src/backend/ir/IRCodeGenerator.h
+    src/backend/ir/IRCodeGenerator.cpp
+    src/backend/ir/SSAConstructor.h
+    src/backend/ir/SSAConstructor.cpp
+    src/backend/ir/Liveness.h
+    src/backend/ir/Liveness.cpp
+    src/backend/ir/RegAlloc.h
+    src/backend/ir/RegAlloc.cpp
+    src/backend/ir/passes/IRPassManager.h
+    src/backend/ir/passes/IRPassManager.cpp
+    src/backend/ir/passes/IRConstProp.h
+    src/backend/ir/passes/IRConstProp.cpp
+    src/backend/ir/passes/IRDeadCodeElim.h
+    src/backend/ir/passes/IRDeadCodeElim.cpp
+    src/backend/ir/passes/IRCopyProp.h
+    src/backend/ir/passes/IRCopyProp.cpp
+    src/backend/ir/passes/IRStrengthReduction.h
+    src/backend/ir/passes/IRStrengthReduction.cpp
+    src/backend/ir/passes/IRLICM.h
+    src/backend/ir/passes/IRLICM.cpp
     src/frontend/Diagnostics.cpp
     src/frontend/Diagnostics.h
     src/frontend/Semantics.cpp
@@ -58,6 +103,9 @@ set(MINIC_CORE_SOURCES
     src/frontend/Token.h
     src/backend/Target.h
     src/frontend/Ast.h
+    src/frontend/AstAccept.cpp
+    src/frontend/ExprVisitor.h
+    src/frontend/StmtVisitor.h
 )
 
 add_executable(${PROJECT_NAME}
@@ -92,6 +140,7 @@ if (WIN32)
         src/frontend/Preprocessor.cpp
         src/frontend/Parser.cpp
         src/frontend/Semantics.cpp
+        src/frontend/AstAccept.cpp
     )
     target_link_libraries(minic_gtests PRIVATE GTest::gtest GTest::gtest_main)
     target_compile_definitions(minic_gtests
@@ -117,6 +166,8 @@ function(configure_minic_target target_name)
             ${PROJECT_SOURCE_DIR}/src
             ${PROJECT_SOURCE_DIR}/src/app
             ${PROJECT_SOURCE_DIR}/src/backend
+            ${PROJECT_SOURCE_DIR}/src/backend/ir
+            ${PROJECT_SOURCE_DIR}/src/backend/ir/passes
             ${PROJECT_SOURCE_DIR}/src/frontend
             ${PROJECT_SOURCE_DIR}/src/linker
             ${PROJECT_SOURCE_DIR}/src/support
@@ -716,7 +767,7 @@ if (WIN32)
         COMPILER_ARGS --link-trace
         OUTPUT_EXE build/output/tmp_link_bad_section.exe
         EXPECTED_EXIT 0
-        ERROR_MARKERS "linker diagnostic:" ".pdata"
+        ERROR_MARKERS "linker diagnostic:" ".badsec"
         LABELS regression phase-current linker-failures
     )
 

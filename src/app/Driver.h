@@ -32,6 +32,7 @@ private:
         bool depFileGenerate = false;       // -MD: 编译并生成依赖文件
         std::filesystem::path depFilePath;  // -MF: 依赖文件输出路径
         unsigned int jobs = 0;
+        bool useIR = false;             // --ir: 使用 SSA IR 流水线
     };
 
     Options parseOptions(const std::vector<std::string> &rawArgs) const;

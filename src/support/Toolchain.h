@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "Target.h"
@@ -28,7 +29,7 @@ public:
         TargetKind target,
         const std::filesystem::path &asmPath,
         const std::filesystem::path &objPath);
-    static void linkObjects(const ToolchainPaths &paths, const TargetSpec &target, const std::vector<std::filesystem::path> &objPaths, const std::filesystem::path &exePath, bool traceLinker, unsigned int jobs);
+    static void linkObjects(const ToolchainPaths &paths, const TargetSpec &target, const std::vector<std::filesystem::path> &objPaths, const std::filesystem::path &exePath, bool traceLinker, unsigned int jobs, const std::vector<std::pair<std::string, std::string>> &exports = {});
 
 private:
     static std::filesystem::path findExecutableOnPath(const std::string &name);

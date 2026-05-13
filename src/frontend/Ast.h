@@ -5,6 +5,9 @@
 #include <string>
 #include <vector>
 
+class ExprVisitor;
+class StmtVisitor;
+
 enum class TypeKind {
     Struct,
     Union,
@@ -429,6 +432,7 @@ struct Expr {
 
     explicit Expr(Kind kindValue) : kind(kindValue) {}
     virtual ~Expr() = default;
+    virtual void accept(ExprVisitor &visitor) = 0;
 
     Kind kind;
     TypePtr type;
@@ -439,17 +443,20 @@ struct Expr {
 
 struct NumberExpr : Expr {
     explicit NumberExpr(long long valueValue) : Expr(Kind::Number), value(valueValue) {}
+    void accept(ExprVisitor &visitor) override;
     long long value;
 };
 
 struct FloatLiteralExpr : Expr {
     explicit FloatLiteralExpr(double valueValue) : Expr(Kind::FloatLiteral), value(valueValue) {}
+    void accept(ExprVisitor &visitor) override;
     double value;
 };
 
 struct StringExpr : Expr {
     explicit StringExpr(std::string valueValue)
         : Expr(Kind::String), value(std::move(valueValue)) {}
+    void accept(ExprVisitor &visitor) override;
 
     std::string value;
     std::string label;
@@ -458,6 +465,7 @@ struct StringExpr : Expr {
 struct VariableExpr : Expr {
     explicit VariableExpr(std::string nameValue)
         : Expr(Kind::Variable), name(std::move(nameValue)), stackOffset(0) {}
+    void accept(ExprVisitor &visitor) override;
 
     std::string name;
     int stackOffset;
@@ -468,6 +476,7 @@ struct VariableExpr : Expr {
 struct UnaryExpr : Expr {
     UnaryExpr(UnaryOp opValue, std::unique_ptr<Expr> operandValue)
         : Expr(Kind::Unary), op(opValue), operand(std::move(operandValue)) {}
+    void accept(ExprVisitor &visitor) override;
 
     UnaryOp op;
     std::unique_ptr<Expr> operand;
@@ -478,6 +487,7 @@ struct UnaryExpr : Expr {
 struct BinaryExpr : Expr {
     BinaryExpr(BinaryOp opValue, std::unique_ptr<Expr> leftValue, std::unique_ptr<Expr> rightValue)
         : Expr(Kind::Binary), op(opValue), left(std::move(leftValue)), right(std::move(rightValue)) {}
+    void accept(ExprVisitor &visitor) override;
 
     BinaryOp op;
     std::unique_ptr<Expr> left;
@@ -487,6 +497,7 @@ struct BinaryExpr : Expr {
 struct AssignExpr : Expr {
     AssignExpr(std::unique_ptr<Expr> targetValue, std::unique_ptr<Expr> valueValue)
         : Expr(Kind::Assign), target(std::move(targetValue)), value(std::move(valueValue)) {}
+    void accept(ExprVisitor &visitor) override;
 
     std::unique_ptr<Expr> target;
     std::unique_ptr<Expr> value;
@@ -505,6 +516,7 @@ struct Designator {
 struct InitializerListExpr : Expr {
     explicit InitializerListExpr(std::vector<std::unique_ptr<Expr>> elementsValue)
         : Expr(Kind::InitializerList), elements(std::move(elementsValue)) {}
+    void accept(ExprVisitor &visitor) override;
 
     std::vector<std::unique_ptr<Expr>> elements;
     std::vector<std::vector<Designator>> designators; // 每个元素的指示符链（可为空）
@@ -513,6 +525,7 @@ struct InitializerListExpr : Expr {
 struct CompoundLiteralExpr : Expr {
     CompoundLiteralExpr(TypePtr typeValue, std::unique_ptr<InitializerListExpr> initValue)
         : Expr(Kind::CompoundLiteral), compoundType(std::move(typeValue)), init(std::move(initValue)) {}
+    void accept(ExprVisitor &visitor) override;
 
     TypePtr compoundType;
     std::unique_ptr<InitializerListExpr> init;
@@ -522,6 +535,7 @@ struct CompoundLiteralExpr : Expr {
 struct CallExpr : Expr {
     CallExpr(std::unique_ptr<Expr> calleeValue, std::vector<std::unique_ptr<Expr>> argumentsValue)
         : Expr(Kind::Call), callee(std::move(calleeValue)), arguments(std::move(argumentsValue)) {}
+    void accept(ExprVisitor &visitor) override;
 
     std::unique_ptr<Expr> callee;
     std::vector<std::unique_ptr<Expr>> arguments;
@@ -531,6 +545,7 @@ struct CallExpr : Expr {
 struct IndexExpr : Expr {
     IndexExpr(std::unique_ptr<Expr> baseValue, std::unique_ptr<Expr> indexValue)
         : Expr(Kind::Index), base(std::move(baseValue)), index(std::move(indexValue)) {}
+    void accept(ExprVisitor &visitor) override;
 
     std::unique_ptr<Expr> base;
     std::unique_ptr<Expr> index;
@@ -539,6 +554,7 @@ struct IndexExpr : Expr {
 struct MemberAccessExpr : Expr {
     MemberAccessExpr(std::unique_ptr<Expr> baseValue, std::string memberNameValue)
         : Expr(Kind::MemberAccess), base(std::move(baseValue)), memberName(std::move(memberNameValue)) {}
+    void accept(ExprVisitor &visitor) override;
 
     std::unique_ptr<Expr> base;
     std::string memberName;
@@ -556,6 +572,7 @@ struct TernaryExpr : Expr {
           condition(std::move(conditionValue)),
           thenExpr(std::move(thenValue)),
           elseExpr(std::move(elseValue)) {}
+    void accept(ExprVisitor &visitor) override;
 
     std::unique_ptr<Expr> condition;
     std::unique_ptr<Expr> thenExpr;
@@ -565,6 +582,7 @@ struct TernaryExpr : Expr {
 struct CastExpr : Expr {
     CastExpr(TypePtr targetTypeValue, std::unique_ptr<Expr> operandValue)
         : Expr(Kind::Cast), targetType(std::move(targetTypeValue)), operand(std::move(operandValue)) {}
+    void accept(ExprVisitor &visitor) override;
 
     TypePtr targetType;
     std::unique_ptr<Expr> operand;
@@ -573,6 +591,7 @@ struct CastExpr : Expr {
 struct BuiltinVaStartExpr : Expr {
     BuiltinVaStartExpr(std::unique_ptr<Expr> apExpr, std::string lastParamNameValue)
         : Expr(Kind::BuiltinVaStart), ap(std::move(apExpr)), lastParamName(std::move(lastParamNameValue)) {}
+    void accept(ExprVisitor &visitor) override;
 
     std::unique_ptr<Expr> ap;
     std::string lastParamName;
@@ -582,6 +601,7 @@ struct BuiltinVaStartExpr : Expr {
 struct BuiltinVaArgExpr : Expr {
     BuiltinVaArgExpr(std::unique_ptr<Expr> apExpr, TypePtr argTypeValue)
         : Expr(Kind::BuiltinVaArg), ap(std::move(apExpr)), argType(std::move(argTypeValue)) {}
+    void accept(ExprVisitor &visitor) override;
 
     std::unique_ptr<Expr> ap;
     TypePtr argType;
@@ -590,6 +610,7 @@ struct BuiltinVaArgExpr : Expr {
 struct BuiltinVaEndExpr : Expr {
     explicit BuiltinVaEndExpr(std::unique_ptr<Expr> apExpr)
         : Expr(Kind::BuiltinVaEnd), ap(std::move(apExpr)) {}
+    void accept(ExprVisitor &visitor) override;
 
     std::unique_ptr<Expr> ap;
 };
@@ -602,6 +623,7 @@ struct GenericAssociation {
 struct GenericExpr : Expr {
     GenericExpr(std::unique_ptr<Expr> controllingExprValue, std::vector<GenericAssociation> associationsValue)
         : Expr(Kind::Generic), controllingExpr(std::move(controllingExprValue)), associations(std::move(associationsValue)) {}
+    void accept(ExprVisitor &visitor) override;
 
     std::unique_ptr<Expr> controllingExpr;
     std::vector<GenericAssociation> associations;
@@ -614,6 +636,7 @@ struct Stmt;  // 前向声明
 struct StmtExpr : Expr {
     StmtExpr(std::vector<std::unique_ptr<Stmt>> stmtsValue, std::unique_ptr<Expr> resultValue)
         : Expr(Kind::StmtExpr), statements(std::move(stmtsValue)), result(std::move(resultValue)) {}
+    void accept(ExprVisitor &visitor) override;
 
     std::vector<std::unique_ptr<Stmt>> statements;
     std::unique_ptr<Expr> result;
@@ -639,6 +662,7 @@ struct Stmt {
 
     explicit Stmt(Kind kindValue) : kind(kindValue) {}
     virtual ~Stmt() = default;
+    virtual void accept(StmtVisitor &visitor) = 0;
 
     Kind kind;
     int line = 0;
@@ -648,6 +672,7 @@ struct Stmt {
 struct ReturnStmt : Stmt {
     explicit ReturnStmt(std::unique_ptr<Expr> exprValue)
         : Stmt(Kind::Return), expr(std::move(exprValue)) {}
+    void accept(StmtVisitor &visitor) override;
 
     std::unique_ptr<Expr> expr;
 };
@@ -655,6 +680,7 @@ struct ReturnStmt : Stmt {
 struct ExprStmt : Stmt {
     explicit ExprStmt(std::unique_ptr<Expr> exprValue)
         : Stmt(Kind::Expr), expr(std::move(exprValue)) {}
+    void accept(StmtVisitor &visitor) override;
 
     std::unique_ptr<Expr> expr;
 };
@@ -662,6 +688,7 @@ struct ExprStmt : Stmt {
 struct DeclStmt : Stmt {
     DeclStmt(TypePtr typeValue, std::string nameValue, std::unique_ptr<Expr> initValue)
         : Stmt(Kind::Decl), type(std::move(typeValue)), name(std::move(nameValue)), init(std::move(initValue)) {}
+    void accept(StmtVisitor &visitor) override;
 
     TypePtr type;
     std::string name;
@@ -676,6 +703,7 @@ struct DeclStmt : Stmt {
 
 struct BlockStmt : Stmt {
     BlockStmt() : Stmt(Kind::Block) {}
+    void accept(StmtVisitor &visitor) override;
     std::vector<std::unique_ptr<Stmt>> statements;
 };
 
@@ -688,6 +716,7 @@ struct IfStmt : Stmt {
           condition(std::move(conditionValue)),
           thenBranch(std::move(thenBranchValue)),
           elseBranch(std::move(elseBranchValue)) {}
+    void accept(StmtVisitor &visitor) override;
 
     std::unique_ptr<Expr> condition;
     std::unique_ptr<Stmt> thenBranch;
@@ -697,6 +726,7 @@ struct IfStmt : Stmt {
 struct WhileStmt : Stmt {
     WhileStmt(std::unique_ptr<Expr> conditionValue, std::unique_ptr<Stmt> bodyValue)
         : Stmt(Kind::While), condition(std::move(conditionValue)), body(std::move(bodyValue)) {}
+    void accept(StmtVisitor &visitor) override;
 
     std::unique_ptr<Expr> condition;
     std::unique_ptr<Stmt> body;
@@ -713,6 +743,7 @@ struct ForStmt : Stmt {
           condition(std::move(conditionValue)),
           update(std::move(updateValue)),
           body(std::move(bodyValue)) {}
+    void accept(StmtVisitor &visitor) override;
 
     std::unique_ptr<Stmt> init;
     std::unique_ptr<Expr> condition;
@@ -722,15 +753,18 @@ struct ForStmt : Stmt {
 
 struct BreakStmt : Stmt {
     BreakStmt() : Stmt(Kind::Break) {}
+    void accept(StmtVisitor &visitor) override;
 };
 
 struct ContinueStmt : Stmt {
     ContinueStmt() : Stmt(Kind::Continue) {}
+    void accept(StmtVisitor &visitor) override;
 };
 
 struct DoWhileStmt : Stmt {
     DoWhileStmt(std::unique_ptr<Stmt> bodyValue, std::unique_ptr<Expr> conditionValue)
         : Stmt(Kind::DoWhile), body(std::move(bodyValue)), condition(std::move(conditionValue)) {}
+    void accept(StmtVisitor &visitor) override;
 
     std::unique_ptr<Stmt> body;
     std::unique_ptr<Expr> condition;
@@ -750,6 +784,7 @@ struct SwitchStmt : Stmt {
           scrutinee(std::move(scrutineeValue)),
           cases(std::move(casesValue)),
           defaultBody(std::move(defaultBodyValue)) {}
+    void accept(StmtVisitor &visitor) override;
 
     std::unique_ptr<Expr> scrutinee;
     std::vector<SwitchCase> cases;
@@ -759,6 +794,7 @@ struct SwitchStmt : Stmt {
 struct GotoStmt : Stmt {
     explicit GotoStmt(std::string targetName)
         : Stmt(Kind::Goto), targetName(std::move(targetName)) {}
+    void accept(StmtVisitor &visitor) override;
 
     std::string targetName;
 };
@@ -766,6 +802,7 @@ struct GotoStmt : Stmt {
 struct LabelStmt : Stmt {
     LabelStmt(std::string nameValue, std::unique_ptr<Stmt> bodyValue)
         : Stmt(Kind::Label), name(std::move(nameValue)), body(std::move(bodyValue)) {}
+    void accept(StmtVisitor &visitor) override;
 
     std::string name;
     std::unique_ptr<Stmt> body;
@@ -774,6 +811,7 @@ struct LabelStmt : Stmt {
 struct StaticAssertStmt : Stmt {
     StaticAssertStmt(std::unique_ptr<Expr> conditionValue, std::string messageValue)
         : Stmt(Kind::StaticAssert), condition(std::move(conditionValue)), message(std::move(messageValue)) {}
+    void accept(StmtVisitor &visitor) override;
 
     std::unique_ptr<Expr> condition;
     std::string message;

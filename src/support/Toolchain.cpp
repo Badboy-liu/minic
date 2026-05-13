@@ -97,13 +97,17 @@ void Toolchain::linkObjects(
     const std::vector<fs::path> &objPaths,
     const fs::path &exePath,
     bool traceLinker,
-    unsigned int jobs) {
+    unsigned int jobs,
+    const std::vector<std::pair<std::string, std::string>> &exports) {
     LinkerInvocation invocation;
     invocation.target = &target;
     invocation.objPaths = objPaths;
     invocation.outputPath = exePath;
     invocation.traceLinker = traceLinker;
     invocation.jobs = jobs;
+    for (const auto &[name, symbolName] : exports) {
+        invocation.exports.push_back({name, symbolName});
+    }
     createLinkerBackend(target.linkerFlavor)->link(paths, invocation);
 }
 

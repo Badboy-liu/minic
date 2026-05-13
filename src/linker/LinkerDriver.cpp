@@ -18,7 +18,8 @@ int LinkerDriver::run(const std::vector<std::string> &args) {
         options.inputPaths,
         options.outputPath,
         options.linkTrace,
-        sanitizeJobs(options.jobs));
+        sanitizeJobs(options.jobs),
+        options.exports);
     std::cout << "Generated executable: " << options.outputPath.string() << '\n';
     return 0;
 }
@@ -49,6 +50,21 @@ LinkerDriver::Options LinkerDriver::parseOptions(const std::vector<std::string> 
             options.jobs = sanitizeJobs(static_cast<unsigned int>(std::stoul(args[i].substr(2))));
         } else if (args[i] == "--link-trace") {
             options.linkTrace = true;
+        } else if (args[i] == "--export") {
+            if (i + 1 >= args.size()) {
+                throw std::runtime_error("missing symbol name after --export");
+            }
+            const std::string exportSpec = args[++i];
+            const std::size_t eqPos = exportSpec.find('=');
+            std::pair<std::string, std::string> entry;
+            if (eqPos != std::string::npos) {
+                entry.first = exportSpec.substr(0, eqPos);
+                entry.second = exportSpec.substr(eqPos + 1);
+            } else {
+                entry.first = exportSpec;
+                entry.second = exportSpec;
+            }
+            options.exports.push_back(std::move(entry));
         } else {
             const fs::path inputPath = args[i];
             if (!isObjectInput(inputPath)) {
@@ -86,5 +102,5 @@ unsigned int LinkerDriver::sanitizeJobs(unsigned int requestedJobs) {
 }
 
 std::string LinkerDriver::usage() {
-    return "Usage: minic-link <input.obj|input.o>... [--target x86_64-windows|x86_64-linux] [-o output] [--link-trace] [-j N|--jobs N]";
+    return "Usage: minic-link <input.obj|input.o>... [--target x86_64-windows|x86_64-linux] [-o output] [--link-trace] [-j N|--jobs N] [--export name[=internal]]";
 }

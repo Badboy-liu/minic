@@ -24,6 +24,7 @@ namespace fs = std::filesystem;
 namespace {
 constexpr std::uint16_t MachineAmd64 = 0x8664;
 constexpr std::uint16_t RelAmd64Addr64 = 0x0001;
+constexpr std::uint16_t RelAmd64Addr32Nb = 0x0003;
 constexpr std::uint16_t RelAmd64Rel32 = 0x0004;
 constexpr std::uint16_t RelAmd64Section = 0x000A;
 constexpr std::uint16_t RelAmd64Secrel = 0x000B;
@@ -182,6 +183,18 @@ struct DelayImportLayout {
     std::vector<std::uint8_t> bytes;                 // 完整的延迟导入二进制数据
 };
 
+// PE 导出表布局
+struct ExportLayout {
+    std::uint32_t rva = 0;
+    std::uint32_t size = 0;
+    std::vector<std::uint8_t> bytes;
+    struct Entry {
+        std::string name;
+        std::uint32_t functionRva = 0;
+    };
+    std::vector<Entry> entries;
+};
+
 struct ResolvedSymbolTraceEntry {
     fs::path objectPath;
     std::string sectionName;
@@ -238,7 +251,9 @@ unsigned int objectReadWorkerCount(std::size_t taskCount, unsigned int requested
 std::string linkerDiagnostic(const std::string &detail);
 
 bool isRecognizedSection(const std::string &name) {
-    return name == ".text" || name == ".data" || name == ".rdata" || name == ".bss" || name == ".tls";
+    return name == ".text" || name == ".data" || name == ".rdata" || name == ".bss" || name == ".tls"
+        || name == ".debug_str" || name == ".debug_abbrev" || name == ".debug_line" || name == ".debug_info"
+        || name == ".pdata" || name == ".xdata";
 }
 
 bool isTraceableSymbol(const Symbol &symbol) {
@@ -631,6 +646,14 @@ void patch32(std::vector<std::uint8_t> &bytes, std::size_t offset, std::uint32_t
     write32(bytes, offset, value);
 }
 
+void patch16(std::vector<std::uint8_t> &bytes, std::size_t offset, std::uint16_t value) {
+    if (offset + 2 > bytes.size()) {
+        throw std::runtime_error("internal linker error: patch outside buffer");
+    }
+    bytes[offset] = static_cast<std::uint8_t>(value & 0xff);
+    bytes[offset + 1] = static_cast<std::uint8_t>((value >> 8) & 0xff);
+}
+
 void patch64(std::vector<std::uint8_t> &bytes, std::size_t offset, std::uint64_t value) {
     if (offset + 8 > bytes.size()) {
         throw std::runtime_error("internal linker error: patch outside buffer");
@@ -921,6 +944,114 @@ ImportLayout buildImportLayout(
     return layout;
 }
 
+// 构建 PE 导出表布局
+ExportLayout buildExportLayout(
+    std::uint32_t edataRva,
+    const std::string &dllName,
+    std::vector<ExportLayout::Entry> entries) {
+    ExportLayout layout;
+    layout.rva = edataRva;
+    layout.entries = std::move(entries);
+
+    // 按名称字母排序（PE 规范要求）
+    std::sort(layout.entries.begin(), layout.entries.end(),
+        [](const ExportLayout::Entry &a, const ExportLayout::Entry &b) {
+            return a.name < b.name;
+        });
+
+    const std::uint32_t numEntries = static_cast<std::uint32_t>(layout.entries.size());
+
+    // IMAGE_EXPORT_DIRECTORY = 40 字节
+    constexpr std::uint32_t dirSize = 40;
+    // EAT = numEntries * 4
+    const std::uint32_t eatSize = numEntries * 4;
+    // Name Pointer Table = numEntries * 4
+    const std::uint32_t nptSize = numEntries * 4;
+    // Ordinal Table = numEntries * 2
+    const std::uint32_t ordSize = numEntries * 2;
+
+    // 计算各部分的 RVA 偏移
+    const std::uint32_t eatOffset = dirSize;
+    const std::uint32_t nptOffset = eatOffset + eatSize;
+    const std::uint32_t ordOffset = nptOffset + nptSize;
+    const std::uint32_t dllNameOffset = ordOffset + ordSize;
+
+    // 预留空间：目录 + EAT + NPT + Ordinal + DLL Name
+    layout.bytes.resize(dirSize + eatSize + nptSize + ordSize, 0);
+    appendString(layout.bytes, dllName);
+    // 对齐到 4 字节
+    while (layout.bytes.size() % 4 != 0) layout.bytes.push_back(0);
+
+    layout.size = static_cast<std::uint32_t>(layout.bytes.size());
+
+    // 填充 IMAGE_EXPORT_DIRECTORY
+    // Characteristics (0)
+    append32(layout.bytes, 0);  // 已在 resize 中预留，用 patch
+    patch32(layout.bytes, 0, 0);  // Characteristics
+    patch32(layout.bytes, 4, 0);  // TimeDateStamp
+    patch32(layout.bytes, 8, 0);  // MajorVersion/MinorVersion
+    patch32(layout.bytes, 12, edataRva + dllNameOffset);  // Name RVA
+    patch32(layout.bytes, 16, 0);  // OrdinalBase
+    patch32(layout.bytes, 20, numEntries);  // NumberOfFunctions
+    patch32(layout.bytes, 24, numEntries);  // NumberOfNames
+    patch32(layout.bytes, 28, edataRva + eatOffset);  // AddressOfFunctions
+    patch32(layout.bytes, 32, edataRva + nptOffset);  // AddressOfNames
+    patch32(layout.bytes, 36, edataRva + ordOffset);  // AddressOfNameOrdinals
+
+    // 填充 EAT、Name Pointer Table、Ordinal Table
+    for (std::uint32_t i = 0; i < numEntries; ++i) {
+        // EAT: 函数 RVA
+        patch32(layout.bytes, eatOffset + i * 4, layout.entries[i].functionRva);
+        // NPT: 名称 RVA（名称字符串紧跟在 ordinal 表之后）
+        const std::uint32_t nameOffset = dllNameOffset + static_cast<std::uint32_t>(dllName.size() + 1);
+        // 需要计算每个名称的偏移
+        // 重新计算：名称字符串从 dllNameOffset + dllName.size() + 1 开始
+    }
+
+    // 重新实现：先构建名称字符串区域，再填充表格
+    layout.bytes.clear();
+    layout.bytes.resize(dirSize + eatSize + nptSize + ordSize, 0);
+
+    // 构建名称字符串区域
+    std::vector<std::uint32_t> nameOffsets;
+    std::uint32_t nameRegionStart = dirSize + eatSize + nptSize + ordSize;
+    // DLL Name
+    const std::uint32_t dllNameStrOffset = nameRegionStart;
+    for (char c : dllName) layout.bytes.push_back(static_cast<std::uint8_t>(c));
+    layout.bytes.push_back(0);
+    // 导出名称
+    for (const auto &entry : layout.entries) {
+        nameOffsets.push_back(static_cast<std::uint32_t>(layout.bytes.size()));
+        for (char c : entry.name) layout.bytes.push_back(static_cast<std::uint8_t>(c));
+        layout.bytes.push_back(0);
+    }
+    // 对齐到 4 字节
+    while (layout.bytes.size() % 4 != 0) layout.bytes.push_back(0);
+
+    layout.size = static_cast<std::uint32_t>(layout.bytes.size());
+
+    // 填充 IMAGE_EXPORT_DIRECTORY
+    patch32(layout.bytes, 0, 0);  // Characteristics
+    patch32(layout.bytes, 4, 0);  // TimeDateStamp
+    patch32(layout.bytes, 8, 0);  // MajorVersion/MinorVersion
+    patch32(layout.bytes, 12, edataRva + dllNameStrOffset);  // Name RVA
+    patch32(layout.bytes, 16, 0);  // OrdinalBase
+    patch32(layout.bytes, 20, numEntries);  // NumberOfFunctions
+    patch32(layout.bytes, 24, numEntries);  // NumberOfNames
+    patch32(layout.bytes, 28, edataRva + eatOffset);  // AddressOfFunctions
+    patch32(layout.bytes, 32, edataRva + nptOffset);  // AddressOfNames
+    patch32(layout.bytes, 36, edataRva + ordOffset);  // AddressOfNameOrdinals
+
+    // 填充 EAT、NPT、Ordinal Table
+    for (std::uint32_t i = 0; i < numEntries; ++i) {
+        patch32(layout.bytes, eatOffset + i * 4, layout.entries[i].functionRva);
+        patch32(layout.bytes, nptOffset + i * 4, edataRva + nameOffsets[i]);
+        patch16(layout.bytes, ordOffset + i * 2, static_cast<std::uint16_t>(i));
+    }
+
+    return layout;
+}
+
 std::uint32_t resolveRelocationTargetRva(
     const LinkedObject &linkedObject,
     const Symbol &symbol,
@@ -1080,7 +1211,7 @@ void applyInitializedDataRelocations(
 
         const std::uint32_t mergedSectionOffset = linkedObject.sectionOffsets[sectionIndex];
         for (const auto &relocation : readRelocations(linkedObject.object, section)) {
-            if (relocation.type != RelAmd64Addr64) {
+            if (relocation.type != RelAmd64Addr64 && relocation.type != RelAmd64Addr32Nb) {
                 throw std::runtime_error(
                     objectDiagnostic(
                         linkedObject.object.path,
@@ -1090,6 +1221,22 @@ void applyInitializedDataRelocations(
             if (relocation.symbolIndex >= linkedObject.object.symbols.size()) {
                 throw std::runtime_error(
                     objectDiagnostic(linkedObject.object.path, "relocation references invalid symbol index"));
+            }
+            if (relocation.type == RelAmd64Addr32Nb) {
+                // ADDR32NB：存储 32 位 RVA（不加 ImageBase）
+                if (mergedSectionOffset + relocation.offset + 4 > layoutIt->bytes.size()) {
+                    throw std::runtime_error(
+                        objectDiagnostic(
+                            linkedObject.object.path,
+                            "ADDR32NB relocation points outside merged section: " + section.name));
+                }
+                const Symbol &symbol = linkedObject.object.symbols[relocation.symbolIndex];
+                const std::uint32_t targetRva = resolveRelocationTargetRva(
+                    linkedObject, symbol, sectionRvas, externalSymbols);
+                const std::int32_t addend = readS32(layoutIt->bytes, mergedSectionOffset + relocation.offset);
+                const std::uint32_t storedValue = targetRva + addend;
+                write32(layoutIt->bytes, mergedSectionOffset + relocation.offset, storedValue);
+                continue;
             }
             if (mergedSectionOffset + relocation.offset + 8 > layoutIt->bytes.size()) {
                 throw std::runtime_error(
@@ -1479,7 +1626,15 @@ std::vector<SectionLayout> mergeSections(std::vector<LinkedObject> &linkedObject
         {".rdata", {}, 0, 0, 0, 0, 0x40000040, false},
         {".bss", {}, 0, 0, 0, 0, 0xc0000080, true},
         {".tls", {}, 0, 0, 0, 0,
-            ImageScnCntInitializedData | ImageScnMemRead | ImageScnMemWrite, false}
+            ImageScnCntInitializedData | ImageScnMemRead | ImageScnMemWrite, false},
+        // PE 异常处理表
+        {".pdata", {}, 0, 0, 0, 0, 0x40000040, false},  // initialized, read
+        {".xdata", {}, 0, 0, 0, 0, 0x40000040, false},  // initialized, read
+        // DWARF 调试信息
+        {".debug_str",     {}, 0, 0, 0, 0, 0x42000040, false},  // initialized, read, discardable
+        {".debug_abbrev",  {}, 0, 0, 0, 0, 0x42000040, false},
+        {".debug_line",    {}, 0, 0, 0, 0, 0x42000040, false},
+        {".debug_info",    {}, 0, 0, 0, 0, 0x42000040, false}
     };
 
     for (auto &linkedObject : linkedObjects) {
@@ -1779,14 +1934,15 @@ void PeLinker::linkSingleObject(
     const fs::path &exePath,
     unsigned int jobs,
     std::ostream *trace) {
-    linkObjects({objPath}, exePath, jobs, trace);
+    linkObjects({objPath}, exePath, jobs, trace, nullptr);
 }
 
 void PeLinker::linkObjects(
     const std::vector<fs::path> &objPaths,
     const fs::path &exePath,
     unsigned int jobs,
-    std::ostream *trace) {
+    std::ostream *trace,
+    const LinkerInvocation *invocation) {
     std::vector<LinkedObject> linkedObjects = readLinkedObjects(objPaths, jobs);
     if (trace) {
         traceInputObjects(*trace, linkedObjects);
@@ -1970,7 +2126,8 @@ void PeLinker::linkObjects(
         baseRelocationSites);
     const bool hasBaseRelocations = !baseRelocations.bytes.empty();
     const bool hasDelayImports = !delayImports.groups.empty();
-    const std::uint32_t sectionCount = static_cast<std::uint32_t>(
+
+    std::uint32_t sectionCount = static_cast<std::uint32_t>(
         sections.size() + 1 + (hasBaseRelocations ? 1 : 0));
     const std::uint32_t headersSize = alignTo(0x80 + 4 + 20 + 0xf0 + sectionCount * 40, FileAlignment);
     std::uint32_t nextRawPointer = headersSize;
@@ -2004,6 +2161,37 @@ void PeLinker::linkObjects(
         nextRawPointer += relocRawSize;
     }
 
+    // 构建导出表布局
+    ExportLayout exportLayout;
+    bool hasExports = false;
+    if (invocation && !invocation->exports.empty()) {
+        const std::uint32_t edataRva = hasBaseRelocations
+            ? alignTo(baseRelocations.rva + relocVirtualSize, SectionAlignment)
+            : alignTo(delayImportRva + static_cast<std::uint32_t>(delayImports.bytes.size()), SectionAlignment);
+        std::vector<ExportLayout::Entry> exportEntries;
+        for (const auto &exp : invocation->exports) {
+            const auto it = externalSymbols.find(exp.symbolName);
+            if (it == externalSymbols.end()) {
+                throw std::runtime_error(
+                    linkerDiagnostic("unresolved export symbol: " + exp.symbolName));
+            }
+            exportEntries.push_back({exp.name, it->second});
+        }
+        exportLayout = buildExportLayout(edataRva, "minic_output.dll", std::move(exportEntries));
+        hasExports = !exportLayout.entries.empty();
+        if (hasExports) {
+            sectionCount += 1;
+        }
+    }
+
+    // 导出表节
+    const std::uint32_t edataVirtualSize = hasExports ? exportLayout.size : 0;
+    const std::uint32_t edataRawSize = hasExports ? alignTo(edataVirtualSize, FileAlignment) : 0;
+    const std::uint32_t edataRawPointer = nextRawPointer;
+    if (hasExports) {
+        nextRawPointer += edataRawSize;
+    }
+
     // 计算最终镜像大小
     std::uint32_t finalImageEnd = idataRva + idataVirtualSize;
     if (hasDelayImports) {
@@ -2011,6 +2199,9 @@ void PeLinker::linkObjects(
     }
     if (hasBaseRelocations) {
         finalImageEnd = baseRelocations.rva + relocVirtualSize;
+    }
+    if (hasExports) {
+        finalImageEnd = exportLayout.rva + edataVirtualSize;
     }
     const std::uint32_t sizeOfImage = alignTo(finalImageEnd, SectionAlignment);
     const std::uint32_t fileSize = nextRawPointer;
@@ -2030,6 +2221,13 @@ void PeLinker::linkObjects(
         traceResolvedSymbols(*trace, resolvedSymbolTraceEntries, imports);
         traceRelocations(*trace, relocationTraceEntries);
         traceBaseRelocations(*trace, baseRelocations);
+        if (hasExports) {
+            *trace << "[link] exports\n";
+            *trace << "[link]   summary " << exportLayout.entries.size() << " entries\n";
+            for (const auto &entry : exportLayout.entries) {
+                *trace << "[link]   " << entry.name << " -> rva=0x" << std::hex << entry.functionRva << std::dec << '\n';
+            }
+        }
     }
 
     std::vector<std::uint8_t> file(0x80, 0);
@@ -2089,16 +2287,31 @@ void PeLinker::linkObjects(
     append64(file, 0x1000);
     append32(file, 0);
     append32(file, 16);
-    append32(file, 0);
-    append32(file, 0);
+    // Data Directory 索引 0: Export Table
+    append32(file, hasExports ? exportLayout.rva : 0);
+    append32(file, hasExports ? edataVirtualSize : 0);
+    // Data Directory 索引 1: Import Table
     append32(file, imports.idtRva);
     append32(file, imports.idtSize);
+    // Data Directory 索引 2: Resource Table
     append32(file, 0);
     append32(file, 0);
+
+    // Data Directory 索引 3: Exception Table（.pdata）
+    auto pdataIt = std::find_if(sections.begin(), sections.end(),
+        [](const SectionLayout &s) { return s.name == ".pdata"; });
+    if (pdataIt != sections.end() && pdataIt->virtualSize > 0) {
+        append32(file, pdataIt->rva);
+        append32(file, pdataIt->virtualSize);
+    } else {
+        append32(file, 0);
+        append32(file, 0);
+    }
+
+    // Data Directory 索引 4: Certificate Table
     append32(file, 0);
     append32(file, 0);
-    append32(file, 0);
-    append32(file, 0);
+    // Data Directory 索引 5: Base Relocation Table
     append32(file, hasBaseRelocations ? baseRelocations.rva : 0);
     append32(file, hasBaseRelocations ? relocVirtualSize : 0);
 
@@ -2174,6 +2387,17 @@ void PeLinker::linkObjects(
         write32(file, relocHeader + 36, 0x42000040);
     }
 
+    if (hasExports) {
+        const std::size_t edataHeader = file.size();
+        file.resize(file.size() + 40, 0);
+        writeSectionName(file, edataHeader, ".edata");
+        write32(file, edataHeader + 8, edataVirtualSize);
+        write32(file, edataHeader + 12, exportLayout.rva);
+        write32(file, edataHeader + 16, edataRawSize);
+        write32(file, edataHeader + 20, edataRawPointer);
+        write32(file, edataHeader + 36, 0x40000040);  // IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ
+    }
+
     if (file.size() > headersSize) {
         throw std::runtime_error("internal linker error: PE headers exceed declared header size");
     }
@@ -2188,6 +2412,9 @@ void PeLinker::linkObjects(
     }
     if (hasBaseRelocations) {
         writeBytes(file, relocRawPointer, baseRelocations.bytes);
+    }
+    if (hasExports) {
+        writeBytes(file, edataRawPointer, exportLayout.bytes);
     }
 
     if (!exePath.parent_path().empty()) {

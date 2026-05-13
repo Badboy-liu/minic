@@ -4,6 +4,8 @@
 #include <iosfwd>
 #include <vector>
 
+#include "LinkerBackend.h"
+
 class PeLinker {
 public:
     static void linkSingleObject(
@@ -15,5 +17,6 @@ public:
         const std::vector<std::filesystem::path> &objPaths,
         const std::filesystem::path &exePath,
         unsigned int jobs = 0,
-        std::ostream *trace = nullptr);
+        std::ostream *trace = nullptr,
+        const LinkerInvocation *invocation = nullptr);
 };

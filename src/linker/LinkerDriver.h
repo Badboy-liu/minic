@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "Target.h"
@@ -17,6 +18,7 @@ private:
         TargetKind target = TargetKind::WindowsX64;
         bool linkTrace = false;
         unsigned int jobs = 0;
+        std::vector<std::pair<std::string, std::string>> exports;
     };
 
     Options parseOptions(const std::vector<std::string> &args) const;

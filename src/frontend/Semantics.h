@@ -2,6 +2,8 @@
 
 #include "Ast.h"
 #include "Diagnostics.h"
+#include "ExprVisitor.h"
+#include "StmtVisitor.h"
 
 #include <string>
 #include <unordered_map>
@@ -29,7 +31,7 @@ struct GlobalSignature {
     std::string symbolName;
 };
 
-class SemanticAnalyzer {
+class SemanticAnalyzer : public ExprVisitor, public StmtVisitor {
 public:
     explicit SemanticAnalyzer(DiagnosticEngine *diag = nullptr);
 
@@ -57,6 +59,43 @@ private:
     void analyzeBlock(BlockStmt &block);
     void analyzeStatement(Stmt &stmt);
     void analyzeExpr(Expr &expr);
+
+    // ExprVisitor
+    void visitNumberExpr(NumberExpr &node) override;
+    void visitFloatLiteralExpr(FloatLiteralExpr &node) override;
+    void visitStringExpr(StringExpr &node) override;
+    void visitVariableExpr(VariableExpr &node) override;
+    void visitUnaryExpr(UnaryExpr &node) override;
+    void visitBinaryExpr(BinaryExpr &node) override;
+    void visitInitializerListExpr(InitializerListExpr &node) override;
+    void visitAssignExpr(AssignExpr &node) override;
+    void visitCallExpr(CallExpr &node) override;
+    void visitIndexExpr(IndexExpr &node) override;
+    void visitMemberAccessExpr(MemberAccessExpr &node) override;
+    void visitTernaryExpr(TernaryExpr &node) override;
+    void visitCastExpr(CastExpr &node) override;
+    void visitBuiltinVaStartExpr(BuiltinVaStartExpr &node) override;
+    void visitBuiltinVaArgExpr(BuiltinVaArgExpr &node) override;
+    void visitBuiltinVaEndExpr(BuiltinVaEndExpr &node) override;
+    void visitGenericExpr(GenericExpr &node) override;
+    void visitCompoundLiteralExpr(CompoundLiteralExpr &node) override;
+    void visitStmtExpr(StmtExpr &node) override;
+
+    // StmtVisitor
+    void visitReturnStmt(ReturnStmt &node) override;
+    void visitExprStmt(ExprStmt &node) override;
+    void visitDeclStmt(DeclStmt &node) override;
+    void visitBlockStmt(BlockStmt &node) override;
+    void visitIfStmt(IfStmt &node) override;
+    void visitWhileStmt(WhileStmt &node) override;
+    void visitForStmt(ForStmt &node) override;
+    void visitBreakStmt(BreakStmt &node) override;
+    void visitContinueStmt(ContinueStmt &node) override;
+    void visitDoWhileStmt(DoWhileStmt &node) override;
+    void visitSwitchStmt(SwitchStmt &node) override;
+    void visitGotoStmt(GotoStmt &node) override;
+    void visitLabelStmt(LabelStmt &node) override;
+    void visitStaticAssertStmt(StaticAssertStmt &node) override;
     void enterScope();
     void leaveScope();
     void declareVariable(DeclStmt &decl);
